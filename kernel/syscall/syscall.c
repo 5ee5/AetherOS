@@ -4,7 +4,9 @@
 #include <stdint.h>
 
 #include "core/serial.h"
+#include "drivers/ps2kbd.h"
 #include "fs/vfs.h"
+#include "mem/heap.h"
 #include "mem/vmm.h"
 #include "proc/fd.h"
 #include "proc/process.h"
@@ -57,12 +59,15 @@ void syscall_init(void)
 #define SYS_WRITE     1U
 #define SYS_OPEN      2U
 #define SYS_CLOSE     3U
+#define SYS_GETPID   39U
+#define SYS_EXIT     60U
+#define SYS_WAITPID  61U
 #define SYS_GETUID  102U
 #define SYS_GETGID  104U
 #define SYS_GETEUID 107U
 #define SYS_GETEGID 108U
-#define SYS_GETPID   39U
-#define SYS_EXIT     60U
+#define SYS_SPAWN   500U
+#define SYS_LISTDIR 600U
 
 static int64_t sys_write(uint64_t fd, uint64_t buf_virt, uint64_t count)
 {
@@ -103,14 +108,36 @@ static int64_t sys_open(uint64_t path_virt, uint64_t flags, uint64_t mode)
     return fd;
 }
 
+static int64_t sys_read_stdin(void *buf, uint32_t count)
+{
+    uint8_t *p = (uint8_t *)buf;
+    uint32_t n = 0;
+    while (n < count) {
+        __asm__ volatile("sti" ::: "memory");
+        char c = ps2kbd_getchar();
+        if (!c) {
+            struct thread *t = sched_current();
+            ps2kbd_set_stdin_waiter(t);
+            t->state = THREAD_BLOCKED;
+            __asm__ volatile("cli; int $0x20; sti" ::: "memory");
+            continue;
+        }
+        __asm__ volatile("cli" ::: "memory");
+        p[n++] = (uint8_t)c;
+        if (c == '\n') break;
+    }
+    return (int64_t)n;
+}
+
 static int64_t sys_read(uint64_t fd, uint64_t buf_virt, uint64_t count)
 {
     if (buf_virt + count < buf_virt || buf_virt + count > 0x800000000000ULL) return -14;
+    void *buf = (void *)(uintptr_t)buf_virt;
+    if (fd == 0) return sys_read_stdin(buf, (uint32_t)count);
     fd_table_t *fds = current_fds();
     if (!fds) return -9;
     int vfd = fd_to_vfs(fds, (int)fd);
     if (vfd < 0) return -9;
-    void *buf = (void *)(uintptr_t)buf_virt;
     return vfs_read(vfd, buf, (uint32_t)count);
 }
 
@@ -127,9 +154,23 @@ static int64_t sys_close(uint64_t fd)
 
 static int64_t sys_exit(uint64_t status)
 {
-    (void)status;
-
     struct thread *t = sched_current();
+    struct process *proc = (struct process *)t->process;
+
+    /* Record exit status and wake any sys_waitpid callers. */
+    if (proc) {
+        proc->exit_status = (int32_t)(status & 0xffU);
+        proc->exited = true;
+        struct thread *w = proc->wait_queue;
+        proc->wait_queue = NULL;
+        while (w) {
+            struct thread *nxt = w->wait_next;
+            w->wait_next = NULL;
+            sched_wake(w);
+            w = nxt;
+        }
+    }
+
     if (t->is_user && t->cr3 != 0) {
         vmm_space_destroy(t->cr3);
         t->cr3 = 0;
@@ -146,21 +187,65 @@ static int64_t sys_exit(uint64_t status)
     return 0;
 }
 
+static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
+{
+    (void)options;
+    struct process *target = process_find((uint32_t)pid);
+    if (!target) return -10;   /* ECHILD */
+    struct thread *t = sched_current();
+    while (!target->exited) {
+        t->wait_next = target->wait_queue;
+        target->wait_queue = t;
+        t->state = THREAD_BLOCKED;
+        __asm__ volatile("cli; int $0x20; sti" ::: "memory");
+    }
+    if (status_virt && status_virt < 0x800000000000ULL)
+        *(int32_t *)(uintptr_t)status_virt = target->exit_status << 8;
+    return (int64_t)pid;
+}
+
+static int64_t sys_spawn(uint64_t path_virt)
+{
+    if (path_virt >= 0x800000000000ULL) return -14;
+    const char *path = (const char *)(uintptr_t)path_virt;
+    uint64_t fsize = vfs_file_size(path);
+    if (fsize == UINT64_MAX || fsize == 0 || fsize > 4U * 1024U * 1024U) return -2;
+    void *buf = kmalloc((uint32_t)fsize);
+    if (!buf) return -12;
+    int vfd = vfs_open(path);
+    if (vfd < 0) { kfree(buf); return -2; }
+    vfs_read(vfd, buf, (uint32_t)fsize);
+    vfs_close(vfd);
+    struct process *proc = process_create_from_elf(buf, fsize);
+    kfree(buf);
+    return proc ? (int64_t)proc->pid : -1;
+}
+
+static int64_t sys_listdir(uint64_t path_virt, uint64_t buf_virt, uint64_t bufsz)
+{
+    if (path_virt >= 0x800000000000ULL || buf_virt >= 0x800000000000ULL) return -14;
+    return (int64_t)vfs_listdir((const char *)(uintptr_t)path_virt,
+                                 (char *)(uintptr_t)buf_virt, (uint32_t)bufsz);
+}
+
 int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
                          uint64_t a3, uint64_t a4)
 {
     (void)a3; (void)a4;
     switch (nr) {
-    case SYS_READ:   return sys_read(a0, a1, a2);
-    case SYS_WRITE:  return sys_write(a0, a1, a2);
-    case SYS_OPEN:   return sys_open(a0, a1, a2);
-    case SYS_CLOSE:  return sys_close(a0);
-    case SYS_GETPID: return (int64_t)sched_current()->tid;
-    case SYS_GETUID: { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.uid  : 0; }
-    case SYS_GETGID: { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.gid  : 0; }
-    case SYS_GETEUID:{ struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.euid : 0; }
-    case SYS_GETEGID:{ struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.egid : 0; }
-    case SYS_EXIT:   return sys_exit(a0);
+    case SYS_READ:    return sys_read(a0, a1, a2);
+    case SYS_WRITE:   return sys_write(a0, a1, a2);
+    case SYS_OPEN:    return sys_open(a0, a1, a2);
+    case SYS_CLOSE:   return sys_close(a0);
+    case SYS_GETPID:  return (int64_t)sched_current()->tid;
+    case SYS_EXIT:    return sys_exit(a0);
+    case SYS_WAITPID: return sys_waitpid(a0, a1, a2);
+    case SYS_GETUID:  { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.uid  : 0; }
+    case SYS_GETGID:  { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.gid  : 0; }
+    case SYS_GETEUID: { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.euid : 0; }
+    case SYS_GETEGID: { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.egid : 0; }
+    case SYS_SPAWN:   return sys_spawn(a0);
+    case SYS_LISTDIR: return sys_listdir(a0, a1, a2);
     default:
         serial_write("syscall: unknown nr=");
         serial_write_dec(nr);

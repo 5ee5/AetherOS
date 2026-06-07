@@ -305,3 +305,51 @@ int64_t ext2_read(ext2_fs_t *fs, uint32_t ino, uint64_t off, void *buf, uint32_t
 
     return (int64_t)(size - remaining);
 }
+
+uint32_t ext2_lookup_ino(ext2_fs_t *fs, const char *path)
+{
+    uint32_t ino = 0;
+    if (!ext2_lookup(fs, path, &ino)) return 0;
+    return ino;
+}
+
+static uint32_t list_dir_block(const uint8_t *block, uint32_t block_size,
+                                char *buf, uint32_t bufsz, uint32_t written)
+{
+    const uint8_t *p   = block;
+    const uint8_t *end = block + block_size;
+    while (p < end) {
+        const ext2_dirent_t *de = (const ext2_dirent_t *)p;
+        if (de->rec_len == 0) break;
+        if (de->inode != 0 && de->name_len > 0) {
+            /* Skip . and .. */
+            if (!(de->name_len == 1 && de->name[0] == '.') &&
+                !(de->name_len == 2 && de->name[0] == '.' && de->name[1] == '.')) {
+                uint8_t nlen = de->name_len;
+                if (written + nlen + 1 < bufsz) {
+                    memcpy(buf + written, de->name, nlen);
+                    written += nlen;
+                    buf[written++] = '\n';
+                }
+            }
+        }
+        p += de->rec_len;
+    }
+    return written;
+}
+
+uint32_t ext2_list_dir(ext2_fs_t *fs, uint32_t dir_ino, char *buf, uint32_t bufsz)
+{
+    if (!buf || bufsz == 0) return 0;
+    ext2_inode_t inode;
+    if (!read_inode(fs, dir_ino, &inode)) return 0;
+
+    uint32_t written = 0;
+    for (int b = 0; b < 12; ++b) {
+        if (inode.i_block[b] == 0) break;
+        if (!read_block(fs, inode.i_block[b], fs->scratch)) break;
+        written = list_dir_block(fs->scratch, fs->block_size, buf, bufsz, written);
+    }
+    if (written < bufsz) buf[written] = '\0';
+    return written;
+}

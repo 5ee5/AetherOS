@@ -201,12 +201,5 @@ void desktop_tick(void)
     /* Flush any pending log text. */
     flush_log();
 
-    /* Process keyboard input into the log window. */
-    while (ps2kbd_ready()) {
-        char c = ps2kbd_getchar();
-        if (s_log && c) {
-            char buf[2] = { c, '\0' };
-            win_print(s_log, buf);
-        }
-    }
+    /* Keyboard input is consumed by the shell process; no polling here. */
 }

@@ -1,12 +1,15 @@
 #include "drivers/ps2kbd.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/ioapic.h"
 #include "arch/x86_64/apic.h"
 #include "core/serial.h"
+#include "sched/sched.h"
+#include "sched/thread.h"
 
 #define KBD_DATA_PORT  0x60U
 #define KBD_STATUS_PORT 0x64U
@@ -36,11 +39,14 @@ static const char s_scan_ascii_shift[128] = {
 };
 
 #define KBD_BUF_SIZE 64
-static volatile char   s_buf[KBD_BUF_SIZE];
+static volatile char    s_buf[KBD_BUF_SIZE];
 static volatile uint8_t s_head;
 static volatile uint8_t s_tail;
 static volatile bool    s_shift;
 static volatile bool    s_caps;
+static struct thread   *s_stdin_waiter;
+
+void ps2kbd_set_stdin_waiter(struct thread *t) { s_stdin_waiter = t; }
 
 static inline uint8_t inb(uint16_t port)
 {
@@ -77,6 +83,12 @@ void ps2kbd_handler(void)
     if (next != s_head) {
         s_buf[s_tail] = c;
         s_tail = next;
+    }
+    /* Wake any thread blocked in sys_read(fd=0). */
+    if (s_stdin_waiter) {
+        struct thread *w = s_stdin_waiter;
+        s_stdin_waiter = NULL;
+        sched_wake(w);
     }
 eoi:
     lapic_eoi();

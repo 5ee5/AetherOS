@@ -85,12 +85,14 @@ KERNEL_ASM_SRCS := \
 	kernel/arch/x86_64/syscall_entry.asm \
 	kernel/arch/x86_64/smp_trampoline_blob.asm \
 	kernel/drivers/ps2kbd_isr.asm \
-	user/hello/hello_blob.asm
+	user/hello/hello_blob.asm \
+	user/shell/shell_blob.asm
 
 BOOT_C_SRCS := boot/uefi/main.c
 
 TRAMPOLINE_BIN := $(BUILD_DIR)/smp_trampoline.bin
 HELLO_ELF := $(BUILD_DIR)/hello.elf
+SHELL_ELF := $(BUILD_DIR)/shell.elf
 DISK_IMG := $(BUILD_DIR)/disk.img
 
 KERNEL_OBJS := $(KERNEL_C_SRCS:%.c=$(BUILD_DIR)/%.o) \
@@ -134,6 +136,19 @@ $(HELLO_ELF): $(BUILD_DIR)/hello.o
 # The blob object depends on the ELF binary
 $(BUILD_DIR)/user/hello/hello_blob.o: \
 	user/hello/hello_blob.asm $(HELLO_ELF)
+	@mkdir -p $(@D)
+	$(NASM) -f elf64 $< -o $@
+
+# Shell binary: assemble + link at 0x400000
+$(BUILD_DIR)/shell.o: user/shell/shell.asm
+	@mkdir -p $(@D)
+	$(NASM) -f elf64 -o $@ $<
+
+$(SHELL_ELF): $(BUILD_DIR)/shell.o
+	$(LD) -m elf_x86_64 -Ttext=0x400000 -e _start --build-id=none -o $@ $<
+
+$(BUILD_DIR)/user/shell/shell_blob.o: \
+	user/shell/shell_blob.asm $(SHELL_ELF)
 	@mkdir -p $(@D)
 	$(NASM) -f elf64 $< -o $@
 

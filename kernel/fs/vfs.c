@@ -123,3 +123,11 @@ uint64_t vfs_file_size(const char *path)
     if (!ext2_lookup(s_root_fs, path, &ino)) return UINT64_MAX;
     return ext2_file_size(s_root_fs, ino);
 }
+
+uint32_t vfs_listdir(const char *path, char *buf, uint32_t bufsz)
+{
+    if (!s_root_fs) return 0;
+    uint32_t ino;
+    if (!ext2_lookup(s_root_fs, path, &ino)) return 0;
+    return ext2_list_dir(s_root_fs, ino, buf, bufsz);
+}

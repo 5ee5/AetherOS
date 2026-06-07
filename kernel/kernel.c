@@ -187,10 +187,10 @@ void kernel_main(const struct os_boot_info *boot_info)
 
 	ktest_run_all();
 
-	/* Launch the first user process (embedded ELF binary). */
-	extern const uint8_t hello_elf_start[], hello_elf_end[];
-	process_create_from_elf(hello_elf_start,
-	    (uint64_t)(hello_elf_end - hello_elf_start));
+	/* Launch the interactive shell (embedded ELF binary). */
+	extern const uint8_t shell_elf_start[], shell_elf_end[];
+	process_create_from_elf(shell_elf_start,
+	    (uint64_t)(shell_elf_end - shell_elf_start));
 
 	/* Start the GUI desktop thread. */
 	thread_create(kernel_gui_thread, NULL);

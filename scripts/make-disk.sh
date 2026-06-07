@@ -23,4 +23,10 @@ printf 'Hello from ext2!' > "$TMP"
 debugfs -w "$IMG?offset=${PART_OFFSET}" -R "write ${TMP} hello.txt" 2>/dev/null
 rm -f "$TMP"
 
-echo "disk: created $IMG with /hello.txt"
+# Create /bin/ and add hello.elf so the shell can spawn it
+debugfs -w "$IMG?offset=${PART_OFFSET}" -R "mkdir bin" 2>/dev/null
+if [ -f build/hello.elf ]; then
+    debugfs -w "$IMG?offset=${PART_OFFSET}" -R "write build/hello.elf bin/hello" 2>/dev/null
+fi
+
+echo "disk: created $IMG with /hello.txt and /bin/hello"

@@ -19,4 +19,8 @@ void vfs_close(int fd);
 /* Return the file size for `path`, or UINT64_MAX on error. */
 uint64_t vfs_file_size(const char *path);
 
+/* List entries in directory `path` into `buf` as "name\n" lines.
+   Returns bytes written (not including NUL), 0 on error. */
+uint32_t vfs_listdir(const char *path, char *buf, uint32_t bufsz);
+
 #endif

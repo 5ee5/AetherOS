@@ -25,4 +25,12 @@ int64_t ext2_read(ext2_fs_t *fs, uint32_t ino, uint64_t off, void *buf, uint32_t
 /* Return the file size of inode `ino`. */
 uint64_t ext2_file_size(ext2_fs_t *fs, uint32_t ino);
 
+/* List directory entries of `dir_ino` into `buf` as "name\n" lines.
+   Skips "." and "..".  Returns total bytes written (not including NUL). */
+uint32_t ext2_list_dir(ext2_fs_t *fs, uint32_t dir_ino, char *buf, uint32_t bufsz);
+
+/* Look up a path and return its inode number, or 0 on error.
+   (Wraps ext2_lookup for callers that need the inode.) */
+uint32_t ext2_lookup_ino(ext2_fs_t *fs, const char *path);
+
 #endif

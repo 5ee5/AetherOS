@@ -10,7 +10,16 @@
 #include "sched/thread.h"
 #include "security/cred.h"
 
+#define MAX_PROCS 16
+static struct process *s_procs[MAX_PROCS];
 static uint32_t next_pid = 1;
+
+struct process *process_find(uint32_t pid)
+{
+    for (int i = 0; i < MAX_PROCS; ++i)
+        if (s_procs[i] && s_procs[i]->pid == pid) return s_procs[i];
+    return NULL;
+}
 
 struct process *process_create_from_elf(const void *elf_data, uint64_t size)
 {
@@ -26,12 +35,20 @@ struct process *process_create_from_elf(const void *elf_data, uint64_t size)
         return NULL;
     }
 
-    proc->pid    = next_pid++;
-    proc->cr3    = result.cr3;
+    proc->pid         = next_pid++;
+    proc->cr3         = result.cr3;
+    proc->exited      = false;
+    proc->exit_status = 0;
+    proc->wait_queue  = NULL;
     fd_table_init(&proc->fds);
     cred_init(&proc->cred, 1000, 1000); /* unprivileged user */
     proc->thread = thread_create_user(result.entry, result.user_sp, result.cr3);
     proc->thread->process = proc;
+
+    /* Register in global process table. */
+    for (int i = 0; i < MAX_PROCS; ++i) {
+        if (!s_procs[i]) { s_procs[i] = proc; break; }
+    }
 
     serial_write("process: created pid=");
     serial_write_dec(proc->pid);

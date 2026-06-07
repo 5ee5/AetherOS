@@ -13,4 +13,9 @@ char ps2kbd_getchar(void);
 /* Returns true if there is a character waiting. */
 bool ps2kbd_ready(void);
 
+/* Register a thread to wake when the next keystroke arrives.
+   Called from sys_read_stdin; cleared automatically on wake. */
+struct thread;
+void ps2kbd_set_stdin_waiter(struct thread *t);
+
 #endif
