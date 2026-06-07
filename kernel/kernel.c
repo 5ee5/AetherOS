@@ -10,6 +10,8 @@
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/tss.h"
 #include "arch/x86_64/io.h"
+#include "drivers/ahci.h"
+#include "fs/vfs.h"
 #include "proc/process.h"
 #include "sched/sched.h"
 #include "syscall/syscall.h"
@@ -161,6 +163,9 @@ void kernel_main(const struct os_boot_info *boot_info)
 	serial_write("kernel: smp init done\n");
 
 	run_early_self_checks();
+
+	ahci_init();
+	vfs_init();
 
 	ktest_run_all();
 

@@ -45,7 +45,13 @@ fi
 LOG="${BOOT_TEST_LOG:-build/qemu-boot.log}"
 mkdir -p "$(dirname "$LOG")"
 
+DISK_ARGS=""
+if [ -f "build/disk.img" ]; then
+	DISK_ARGS="-device ich9-ahci,id=ahci -drive id=hd0,if=none,format=raw,file=build/disk.img -device ide-hd,bus=ahci.0,drive=hd0"
+fi
+
 set +e
+# shellcheck disable=SC2086
 timeout "${BOOT_TEST_TIMEOUT:-30s}" qemu-system-x86_64 \
 	-machine q35 \
 	-cpu max \
@@ -53,6 +59,7 @@ timeout "${BOOT_TEST_TIMEOUT:-30s}" qemu-system-x86_64 \
 	-smp 2 \
 	-drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
 	-cdrom build/os.iso \
+	$DISK_ARGS \
 	-serial stdio \
 	-display none \
 	-no-reboot \

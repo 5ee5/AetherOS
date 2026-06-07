@@ -25,6 +25,7 @@ struct thread {
 	uint64_t       cr3;        /* PML4 phys for user thread (0 = kernel) */
 	struct thread *run_next;   /* run queue linkage */
 	struct thread *wait_next;  /* wait/blocked queue linkage */
+	void          *process;    /* owning struct process, or NULL */
 };
 
 /* Create a new kernel thread. Added to run queue automatically. */

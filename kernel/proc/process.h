@@ -3,12 +3,15 @@
 
 #include <stdint.h>
 
+#include "proc/fd.h"
+
 struct thread;
 
 struct process {
     uint32_t      pid;
     struct thread *thread;
     uint64_t      cr3;
+    fd_table_t    fds;
 };
 
 /* Load an ELF binary and create a user-mode thread. Returns NULL on failure. */

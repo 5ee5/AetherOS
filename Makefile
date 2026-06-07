@@ -29,14 +29,20 @@ KERNEL_C_SRCS := \
 	kernel/arch/x86_64/ioapic.c \
 	kernel/arch/x86_64/smp.c \
 	kernel/arch/x86_64/tss.c \
+	kernel/block/gpt.c \
 	kernel/core/fb.c \
 	kernel/core/panic.c \
 	kernel/core/serial.c \
+	kernel/drivers/ahci.c \
+	kernel/drivers/pci.c \
 	kernel/exec/elf.c \
+	kernel/fs/ext2.c \
+	kernel/fs/vfs.c \
 	kernel/lib/string.c \
 	kernel/mem/heap.c \
 	kernel/mem/pmm.c \
 	kernel/mem/vmm.c \
+	kernel/proc/fd.c \
 	kernel/proc/process.c \
 	kernel/sched/sched.c \
 	kernel/sched/thread.c \
@@ -50,6 +56,7 @@ KERNEL_C_SRCS := \
 	kernel/test/test_heap.c \
 	kernel/test/test_sched.c \
 	kernel/test/test_userspace.c \
+	kernel/test/test_vfs.c \
 	kernel/test/tests.c
 
 KERNEL_ASM_SRCS := \
@@ -65,12 +72,13 @@ BOOT_C_SRCS := boot/uefi/main.c
 
 TRAMPOLINE_BIN := $(BUILD_DIR)/smp_trampoline.bin
 HELLO_ELF := $(BUILD_DIR)/hello.elf
+DISK_IMG := $(BUILD_DIR)/disk.img
 
 KERNEL_OBJS := $(KERNEL_C_SRCS:%.c=$(BUILD_DIR)/%.o) \
 	$(KERNEL_ASM_SRCS:%.asm=$(BUILD_DIR)/%.o)
 BOOT_OBJS := $(BOOT_C_SRCS:%.c=$(BUILD_DIR)/%.o)
 
-.PHONY: all clean esp iso check-deps run-qemu test boot-test
+.PHONY: all clean esp iso disk check-deps run-qemu test boot-test
 
 all: esp
 
@@ -127,13 +135,18 @@ esp: $(BUILD_DIR)/BOOTX64.EFI $(KERNEL_BUILD)/kernel.elf
 	cp $(BUILD_DIR)/BOOTX64.EFI $(ESP_DIR)/EFI/BOOT/BOOTX64.EFI
 	cp $(KERNEL_BUILD)/kernel.elf $(ESP_DIR)/EFI/OS/KERNEL.ELF
 
-run-qemu: esp
+$(DISK_IMG):
+	./scripts/make-disk.sh
+
+disk: $(DISK_IMG)
+
+run-qemu: esp disk
 	./scripts/run-qemu.sh
 
 iso: esp
 	./scripts/mkiso.sh
 
-boot-test: iso
+boot-test: iso disk
 	./scripts/test-boot-qemu.sh
 
 test: boot-test

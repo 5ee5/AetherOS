@@ -6,6 +6,7 @@
 #include "core/serial.h"
 #include "exec/elf.h"
 #include "mem/heap.h"
+#include "proc/fd.h"
 #include "sched/thread.h"
 
 static uint32_t next_pid = 1;
@@ -26,7 +27,9 @@ struct process *process_create_from_elf(const void *elf_data, uint64_t size)
 
     proc->pid    = next_pid++;
     proc->cr3    = result.cr3;
+    fd_table_init(&proc->fds);
     proc->thread = thread_create_user(result.entry, result.user_sp, result.cr3);
+    proc->thread->process = proc;
 
     serial_write("process: created pid=");
     serial_write_dec(proc->pid);

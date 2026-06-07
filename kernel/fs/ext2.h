@@ -1,0 +1,28 @@
+#ifndef KERNEL_FS_EXT2_H
+#define KERNEL_FS_EXT2_H
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "block/blkdev.h"
+
+typedef struct ext2_fs ext2_fs_t;
+
+/* Mount an ext2 filesystem from `dev`.
+   `part_offset_lba` is the partition start (sectors from device LBA 0).
+   Returns non-NULL on success; caller must not free. */
+ext2_fs_t *ext2_mount(blkdev_t *dev, uint64_t part_offset_lba);
+
+/* Look up `path` (absolute, e.g. "/hello.txt") in the filesystem.
+   On success fills `inode_out` with the inode number and returns true. */
+bool ext2_lookup(ext2_fs_t *fs, const char *path, uint32_t *inode_out);
+
+/* Read up to `size` bytes from inode `ino` starting at byte offset `off`.
+   `buf` must point into the direct-map region (PMM-allocated).
+   Returns bytes read (may be less than requested at EOF). */
+int64_t ext2_read(ext2_fs_t *fs, uint32_t ino, uint64_t off, void *buf, uint32_t size);
+
+/* Return the file size of inode `ino`. */
+uint64_t ext2_file_size(ext2_fs_t *fs, uint32_t ino);
+
+#endif

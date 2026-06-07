@@ -32,6 +32,11 @@ if [ -z "$OVMF_CODE" ]; then
 	exit 1
 fi
 
+DISK_ARGS=""
+if [ -f "build/disk.img" ]; then
+	DISK_ARGS="-device ich9-ahci,id=ahci -drive id=hd0,if=none,format=raw,file=build/disk.img -device ide-hd,bus=ahci.0,drive=hd0"
+fi
+
 exec qemu-system-x86_64 \
 	-machine q35 \
 	-cpu max \
@@ -39,6 +44,7 @@ exec qemu-system-x86_64 \
 	-smp 2 \
 	-drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
 	-drive format=raw,file=fat:rw:build/esp \
+	$DISK_ARGS \
 	-serial stdio \
 	-display none \
 	-no-reboot \

@@ -1,11 +1,15 @@
 #include "syscall/syscall.h"
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "core/serial.h"
+#include "fs/vfs.h"
+#include "mem/vmm.h"
+#include "proc/fd.h"
+#include "proc/process.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
-#include "mem/vmm.h"
 
 #define IA32_EFER  0xc0000080U
 #define IA32_STAR  0xc0000081U
@@ -49,7 +53,10 @@ void syscall_init(void)
 
 /* ---- Syscall handlers -------------------------------------------------- */
 
+#define SYS_READ    0U
 #define SYS_WRITE   1U
+#define SYS_OPEN    2U
+#define SYS_CLOSE   3U
 #define SYS_GETPID 39U
 #define SYS_EXIT   60U
 
@@ -68,6 +75,50 @@ static int64_t sys_write(uint64_t fd, uint64_t buf_virt, uint64_t count)
         serial_write_char(p[i]);
     }
     return (int64_t)count;
+}
+
+static fd_table_t *current_fds(void)
+{
+    struct thread *t = sched_current();
+    if (!t || !t->process) return NULL;
+    struct process *p = (struct process *)t->process;
+    return &p->fds;
+}
+
+static int64_t sys_open(uint64_t path_virt, uint64_t flags, uint64_t mode)
+{
+    (void)flags; (void)mode;
+    if (path_virt >= 0x800000000000ULL) return -14; /* EFAULT */
+    const char *path = (const char *)(uintptr_t)path_virt;
+    int vfd = vfs_open(path);
+    if (vfd < 0) return -2; /* ENOENT */
+    fd_table_t *fds = current_fds();
+    if (!fds) { vfs_close(vfd); return -9; }
+    int fd = fd_alloc(fds, vfd);
+    if (fd < 0) { vfs_close(vfd); return -24; } /* EMFILE */
+    return fd;
+}
+
+static int64_t sys_read(uint64_t fd, uint64_t buf_virt, uint64_t count)
+{
+    if (buf_virt + count < buf_virt || buf_virt + count > 0x800000000000ULL) return -14;
+    fd_table_t *fds = current_fds();
+    if (!fds) return -9;
+    int vfd = fd_to_vfs(fds, (int)fd);
+    if (vfd < 0) return -9;
+    void *buf = (void *)(uintptr_t)buf_virt;
+    return vfs_read(vfd, buf, (uint32_t)count);
+}
+
+static int64_t sys_close(uint64_t fd)
+{
+    fd_table_t *fds = current_fds();
+    if (!fds) return -9;
+    int vfd = fd_to_vfs(fds, (int)fd);
+    if (vfd < 0) return -9;
+    vfs_close(vfd);
+    fd_free(fds, (int)fd);
+    return 0;
 }
 
 static int64_t sys_exit(uint64_t status)
@@ -96,7 +147,10 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
 {
     (void)a3; (void)a4;
     switch (nr) {
+    case SYS_READ:   return sys_read(a0, a1, a2);
     case SYS_WRITE:  return sys_write(a0, a1, a2);
+    case SYS_OPEN:   return sys_open(a0, a1, a2);
+    case SYS_CLOSE:  return sys_close(a0);
     case SYS_GETPID: return (int64_t)sched_current()->tid;
     case SYS_EXIT:   return sys_exit(a0);
     default:
