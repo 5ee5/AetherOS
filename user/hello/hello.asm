@@ -1,5 +1,5 @@
 ; First user-mode process.
-; Calls sys_write(1, msg, len) then sys_exit(0).
+; Exercises sys_write, sys_getpid, and sys_exit.
 ; Linux x86-64 syscall ABI: nr in rax, args in rdi rsi rdx r10 r8 r9.
 
 bits 64
@@ -13,6 +13,10 @@ _start:
     mov     rdi, 1
     lea     rsi, [rel msg]
     mov     rdx, msglen
+    syscall
+
+    ; sys_getpid() — result ignored, just exercises the path
+    mov     rax, 39
     syscall
 
     ; sys_exit(0)

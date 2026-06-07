@@ -252,8 +252,54 @@ uint64_t vmm_space_create(void)
 
 void vmm_space_destroy(uint64_t pml4_phys)
 {
-	/* For Milestone 3: stub — no page-table walk/free yet. */
-	(void)pml4_phys;
+	if (pml4_phys == 0 || pml4_phys == active_pml4_phys) {
+		return;
+	}
+
+	uint64_t *pml4 = phys_to_virt(pml4_phys);
+
+	/* Walk user half only (PML4 indices 0-255). */
+	for (uint64_t pml4i = 0; pml4i < 256U; ++pml4i) {
+		if ((pml4[pml4i] & PAGE_PRESENT) == 0) {
+			continue;
+		}
+		uint64_t pdpt_phys = pml4[pml4i] & PAGE_MASK;
+		uint64_t *pdpt = phys_to_virt(pdpt_phys);
+
+		for (uint64_t pdpti = 0; pdpti < 512U; ++pdpti) {
+			if ((pdpt[pdpti] & PAGE_PRESENT) == 0) {
+				continue;
+			}
+			if ((pdpt[pdpti] & PAGE_LARGE) != 0) {
+				pmm_free_page(pdpt[pdpti] & PAGE_MASK);
+				continue;
+			}
+			uint64_t pd_phys = pdpt[pdpti] & PAGE_MASK;
+			uint64_t *pd = phys_to_virt(pd_phys);
+
+			for (uint64_t pdi = 0; pdi < 512U; ++pdi) {
+				if ((pd[pdi] & PAGE_PRESENT) == 0) {
+					continue;
+				}
+				if ((pd[pdi] & PAGE_LARGE) != 0) {
+					pmm_free_page(pd[pdi] & PAGE_MASK);
+					continue;
+				}
+				uint64_t pt_phys = pd[pdi] & PAGE_MASK;
+				uint64_t *pt = phys_to_virt(pt_phys);
+
+				for (uint64_t pti = 0; pti < 512U; ++pti) {
+					if ((pt[pti] & PAGE_PRESENT) != 0) {
+						pmm_free_page(pt[pti] & PAGE_MASK);
+					}
+				}
+				pmm_free_page(pt_phys);
+			}
+			pmm_free_page(pd_phys);
+		}
+		pmm_free_page(pdpt_phys);
+	}
+	pmm_free_page(pml4_phys);
 }
 
 bool vmm_space_map(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags)

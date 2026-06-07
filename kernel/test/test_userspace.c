@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "exec/elf.h"
+#include "mem/pmm.h"
 #include "mem/vmm.h"
 
 extern const uint8_t hello_elf_start[];
@@ -19,6 +20,7 @@ void test_userspace_run(void)
     KTEST_ASSERT(size > 0);
 
     /* elf_load must succeed on the embedded hello binary. */
+    uint64_t pages_before = pmm_free_pages();
     elf_load_result_t r;
     bool ok = elf_load(hello_elf_start, size, &r);
     KTEST_ASSERT(ok);
@@ -28,8 +30,11 @@ void test_userspace_run(void)
         /* New address space must differ from kernel PML4. */
         KTEST_ASSERT(r.cr3 != vmm_pml4_phys());
         KTEST_ASSERT(r.cr3 != 0);
-        /* Clean up. */
+        /* elf_load must have consumed pages. */
+        KTEST_ASSERT(pmm_free_pages() < pages_before);
+        /* vmm_space_destroy must recover all allocated pages. */
         vmm_space_destroy(r.cr3);
+        KTEST_ASSERT(pmm_free_pages() == pages_before);
     }
 
     /* elf_load must reject a bad ELF magic. */

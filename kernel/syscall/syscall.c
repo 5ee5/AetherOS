@@ -49,7 +49,8 @@ void syscall_init(void)
 
 /* ---- Syscall handlers -------------------------------------------------- */
 
-#define SYS_WRITE  1U
+#define SYS_WRITE   1U
+#define SYS_GETPID 39U
 #define SYS_EXIT   60U
 
 static int64_t sys_write(uint64_t fd, uint64_t buf_virt, uint64_t count)
@@ -96,6 +97,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     (void)a3; (void)a4;
     switch (nr) {
     case SYS_WRITE:  return sys_write(a0, a1, a2);
+    case SYS_GETPID: return (int64_t)sched_current()->tid;
     case SYS_EXIT:   return sys_exit(a0);
     default:
         serial_write("syscall: unknown nr=");

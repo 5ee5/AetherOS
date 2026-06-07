@@ -9,6 +9,7 @@
 #include "arch/x86_64/tss.h"
 #include "core/panic.h"
 #include "core/serial.h"
+#include "mem/heap.h"
 #include "mem/vmm.h"
 #include "sched/thread.h"
 #include "sync/spinlock.h"
@@ -54,6 +55,10 @@ static struct thread *rq_take(void)
 
 static struct thread *cpu_current[MAX_CPUS];
 static struct thread *cpu_idle[MAX_CPUS];
+
+/* Dead thread waiting to be freed on the next tick (we can't free a thread's
+   kstack while still running on it; deferring one tick ensures we've switched). */
+static struct thread *reap_pending[MAX_CPUS];
 
 /* ---- Public API -------------------------------------------------------- */
 
@@ -103,8 +108,17 @@ void sched_wake(struct thread *t)
 uint64_t sched_tick(uint64_t old_rsp)
 {
 	uint32_t cpu = lapic_id();
-	struct thread *cur = cpu_current[cpu];
 
+	/* Free any thread that died during the previous tick.  We deferred this
+	   because we couldn't kfree a stack while still running on it. */
+	if (reap_pending[cpu] != NULL) {
+		struct thread *dead = reap_pending[cpu];
+		reap_pending[cpu] = NULL;
+		kfree(dead->kstack);
+		kfree(dead);
+	}
+
+	struct thread *cur = cpu_current[cpu];
 	cur->rsp = old_rsp;
 
 	lapic_eoi();
@@ -115,6 +129,9 @@ uint64_t sched_tick(uint64_t old_rsp)
 	if (cur->state == THREAD_RUNNING && !cur->is_idle) {
 		cur->state = THREAD_READY;
 		rq_add(cur);
+	} else if (cur->state == THREAD_DEAD) {
+		/* Don't re-queue; schedule for deferred free next tick. */
+		reap_pending[cpu] = cur;
 	}
 
 	struct thread *next = rq_take();
