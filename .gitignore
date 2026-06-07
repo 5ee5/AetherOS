@@ -1,0 +1,9 @@
+build/
+*.o
+*.so
+*.elf
+*.efi
+*.iso
+*.img
+*.map
+
