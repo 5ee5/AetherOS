@@ -33,3 +33,8 @@ void fb_clear(uint32_t color)
 	}
 }
 
+volatile uint32_t *fb_get_base(void)   { return fb_base; }
+uint32_t           fb_get_width(void)  { return fb_width; }
+uint32_t           fb_get_height(void) { return fb_height; }
+uint32_t           fb_get_stride(void) { return fb_stride; }
+

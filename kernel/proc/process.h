@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "proc/fd.h"
+#include "security/cred.h"
 
 struct thread;
 
@@ -12,6 +13,7 @@ struct process {
     struct thread *thread;
     uint64_t      cr3;
     fd_table_t    fds;
+    cred_t        cred;
 };
 
 /* Load an ELF binary and create a user-mode thread. Returns NULL on failure. */

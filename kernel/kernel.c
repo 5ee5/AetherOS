@@ -11,9 +11,14 @@
 #include "arch/x86_64/tss.h"
 #include "arch/x86_64/io.h"
 #include "drivers/ahci.h"
+#include "drivers/ps2kbd.h"
 #include "fs/vfs.h"
+#include "gui/desktop.h"
+#include "gui/fb_draw.h"
+#include "net/net.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "sched/thread.h"
 #include "syscall/syscall.h"
 #include "core/fb.h"
 #include "core/panic.h"
@@ -31,6 +36,7 @@ extern char __kernel_phys_end[];
 extern char kernel_stack_guard[];
 
 void kernel_main(const struct os_boot_info *boot_info);
+static void kernel_gui_thread(void *arg);
 
 static void validate_boot_info(const struct os_boot_info *boot_info)
 {
@@ -53,6 +59,13 @@ static void validate_boot_info(const struct os_boot_info *boot_info)
 		boot_info->direct_map_size < OS_EARLY_DIRECT_MAP_SIZE) {
 		panic("invalid direct map");
 	}
+}
+
+static void kernel_gui_thread(void *arg)
+{
+	(void)arg;
+	desktop_init();
+	for (;;) { desktop_tick(); thread_yield(); }
 }
 
 static void print_boot_summary(const struct os_boot_info *boot_info)
@@ -166,6 +179,11 @@ void kernel_main(const struct os_boot_info *boot_info)
 
 	ahci_init();
 	vfs_init();
+	ps2kbd_init();
+
+	fb_draw_init();
+
+	net_init();
 
 	ktest_run_all();
 
@@ -173,6 +191,9 @@ void kernel_main(const struct os_boot_info *boot_info)
 	extern const uint8_t hello_elf_start[], hello_elf_end[];
 	process_create_from_elf(hello_elf_start,
 	    (uint64_t)(hello_elf_end - hello_elf_start));
+
+	/* Start the GUI desktop thread. */
+	thread_create(kernel_gui_thread, NULL);
 
 	serial_write("kernel: initialization complete\n");
 

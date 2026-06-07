@@ -45,7 +45,8 @@ exec qemu-system-x86_64 \
 	-drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
 	-drive format=raw,file=fat:rw:build/esp \
 	$DISK_ARGS \
+	-netdev user,id=n0 -device e1000,netdev=n0 \
 	-serial stdio \
-	-display none \
+	-display sdl \
 	-no-reboot \
 	-no-shutdown

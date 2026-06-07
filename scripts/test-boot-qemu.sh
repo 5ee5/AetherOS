@@ -52,7 +52,7 @@ fi
 
 set +e
 # shellcheck disable=SC2086
-timeout "${BOOT_TEST_TIMEOUT:-30s}" qemu-system-x86_64 \
+timeout "${BOOT_TEST_TIMEOUT:-60s}" qemu-system-x86_64 \
 	-machine q35 \
 	-cpu max \
 	-m 512M \
@@ -60,6 +60,7 @@ timeout "${BOOT_TEST_TIMEOUT:-30s}" qemu-system-x86_64 \
 	-drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
 	-cdrom build/os.iso \
 	$DISK_ARGS \
+	-netdev user,id=n0 -device e1000,netdev=n0 \
 	-serial stdio \
 	-display none \
 	-no-reboot \

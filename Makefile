@@ -34,18 +34,36 @@ KERNEL_C_SRCS := \
 	kernel/core/panic.c \
 	kernel/core/serial.c \
 	kernel/drivers/ahci.c \
+	kernel/drivers/e1000.c \
 	kernel/drivers/pci.c \
+	kernel/drivers/ps2kbd.c \
 	kernel/exec/elf.c \
 	kernel/fs/ext2.c \
 	kernel/fs/vfs.c \
+	kernel/gui/desktop.c \
+	kernel/gui/fb_draw.c \
+	kernel/gui/font8x16.c \
+	kernel/gui/window.c \
 	kernel/lib/string.c \
 	kernel/mem/heap.c \
 	kernel/mem/pmm.c \
 	kernel/mem/vmm.c \
+	kernel/net/arp.c \
+	kernel/net/checksum.c \
+	kernel/net/dhcp.c \
+	kernel/net/dns.c \
+	kernel/net/eth.c \
+	kernel/net/icmp.c \
+	kernel/net/ipv4.c \
+	kernel/net/net.c \
+	kernel/net/nic.c \
+	kernel/net/tcp.c \
+	kernel/net/udp.c \
 	kernel/proc/fd.c \
 	kernel/proc/process.c \
 	kernel/sched/sched.c \
 	kernel/sched/thread.c \
+	kernel/security/cred.c \
 	kernel/sync/mutex.c \
 	kernel/sync/spinlock.c \
 	kernel/syscall/syscall.c \
@@ -66,6 +84,7 @@ KERNEL_ASM_SRCS := \
 	kernel/arch/x86_64/sched_asm.asm \
 	kernel/arch/x86_64/syscall_entry.asm \
 	kernel/arch/x86_64/smp_trampoline_blob.asm \
+	kernel/drivers/ps2kbd_isr.asm \
 	user/hello/hello_blob.asm
 
 BOOT_C_SRCS := boot/uefi/main.c

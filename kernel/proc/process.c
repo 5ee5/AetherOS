@@ -8,6 +8,7 @@
 #include "mem/heap.h"
 #include "proc/fd.h"
 #include "sched/thread.h"
+#include "security/cred.h"
 
 static uint32_t next_pid = 1;
 
@@ -28,6 +29,7 @@ struct process *process_create_from_elf(const void *elf_data, uint64_t size)
     proc->pid    = next_pid++;
     proc->cr3    = result.cr3;
     fd_table_init(&proc->fds);
+    cred_init(&proc->cred, 1000, 1000); /* unprivileged user */
     proc->thread = thread_create_user(result.entry, result.user_sp, result.cr3);
     proc->thread->process = proc;
 
