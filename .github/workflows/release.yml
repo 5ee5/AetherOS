@@ -19,19 +19,45 @@ jobs:
         id: tag
         run: |
           LATEST=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' | head -1)
+
+          # Collect commit messages since last tag (or all commits if no tag yet)
+          if [ -n "$LATEST" ]; then
+            COMMITS=$(git log --format="%s %b" "${LATEST}..HEAD")
+          else
+            COMMITS=$(git log --format="%s %b")
+          fi
+
+          # Detect bump level from commit messages
+          BUMP="patch"
+          if echo "$COMMITS" | grep -qi '\[major\]'; then
+            BUMP="major"
+          elif echo "$COMMITS" | grep -qi '\[minor\]'; then
+            BUMP="minor"
+          fi
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+
           if [ -z "$LATEST" ]; then
-            NEXT="v0.1.0"
+            case "$BUMP" in
+              major) NEXT="v1.0.0" ;;
+              minor) NEXT="v0.1.0" ;;
+              *)     NEXT="v0.0.1" ;;
+            esac
           else
             VER="${LATEST#v}"
             MAJOR=$(echo "$VER" | cut -d. -f1)
             MINOR=$(echo "$VER" | cut -d. -f2)
             PATCH=$(echo "$VER" | cut -d. -f3)
             PATCH=${PATCH:-0}
-            NEXT="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+            case "$BUMP" in
+              major) NEXT="v$((MAJOR + 1)).0.0" ;;
+              minor) NEXT="v${MAJOR}.$((MINOR + 1)).0" ;;
+              *)     NEXT="v${MAJOR}.${MINOR}.$((PATCH + 1))" ;;
+            esac
           fi
+
           echo "tag=$NEXT" >> "$GITHUB_OUTPUT"
           echo "prev=$LATEST" >> "$GITHUB_OUTPUT"
-          echo "Next release: $NEXT"
+          echo "Bump level: $BUMP — next release: $NEXT"
 
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y build-essential nasm binutils xorriso mtools
@@ -51,16 +77,24 @@ jobs:
         run: |
           TAG=${{ steps.tag.outputs.tag }}
           PREV=${{ steps.tag.outputs.prev }}
+          BUMP=${{ steps.tag.outputs.bump }}
           if [ -n "$PREV" ]; then
             CHANGES=$(git log --oneline "${PREV}..HEAD" | sed 's/^/- /')
           else
             CHANGES=$(git log --oneline | sed 's/^/- /')
           fi
           [ -z "$CHANGES" ] && CHANGES="- (no changes since last release)"
+          case "$BUMP" in
+            major) BUMP_LABEL="major" ;;
+            minor) BUMP_LABEL="minor feature" ;;
+            *)     BUMP_LABEL="patch" ;;
+          esac
           {
             echo "## Changes since last release"
             echo ""
             echo "$CHANGES"
+            echo ""
+            echo "> Version bump: **${BUMP_LABEL}**"
             echo ""
             echo "## Artifacts"
             echo "- \`aetheros-${TAG}-esp.tar.gz\` — full ESP tree (drop into UEFI partition as \`EFI/\`)"
