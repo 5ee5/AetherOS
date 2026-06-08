@@ -4,7 +4,7 @@ A hobby x86-64 operating system written from scratch in C and NASM assembly. Boo
 
 ## What it does
 
-**Boots from UEFI firmware** — a custom PE32+ EFI application loads the kernel ELF from the ESP partition, builds 4-level page tables, captures GOP framebuffer / ACPI / memory map, calls `ExitBootServices`, and jumps to the kernel in the higher half (`0xffffffff80000000`).
+**Boots from UEFI firmware on real hardware and QEMU** — a custom PE32+ EFI application loads the kernel ELF from the ESP partition, builds 4-level page tables, captures GOP framebuffer / ACPI / memory map, calls `ExitBootServices`, and jumps to the kernel in the higher half (`0xffffffff80000000`). A single 64 MiB USB image (`make usb`) can be flashed to any thumb drive and booted on a real UEFI PC.
 
 **Manages physical and virtual memory** — a bitmap PMM tracks every 4 KiB page across the first 64 GiB of RAM. The VMM walks 4-level page tables for `vmm_map`/`vmm_unmap`/`vmm_protect`, and each process gets its own PML4 address space with the kernel half shared across all of them.
 
@@ -28,7 +28,7 @@ A hobby x86-64 operating system written from scratch in C and NASM assembly. Boo
 
 | Area | Detail |
 |---|---|
-| Boot | UEFI (BOOTX64.EFI), higher-half kernel, GOP framebuffer |
+| Boot | UEFI (BOOTX64.EFI), real hardware + QEMU, higher-half kernel, GOP framebuffer |
 | CPU | x86-64, SMP (up to 64 cores via LAPIC IDs) |
 | Memory | Bitmap PMM, 4-level VMM, first-fit heap with coalescing |
 | Scheduling | Preemptive round-robin, APIC timer ~1 kHz |
