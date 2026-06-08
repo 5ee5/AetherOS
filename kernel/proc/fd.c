@@ -9,7 +9,8 @@ void fd_table_init(fd_table_t *t)
 
 int fd_alloc(fd_table_t *t, int vfs_fd)
 {
-    for (int i = 0; i < MAX_FDS; ++i) {
+    /* Start from 3 to keep 0/1/2 as stdin/stdout/stderr stubs. */
+    for (int i = 3; i < MAX_FDS; ++i) {
         if (!t->fds[i].open) {
             t->fds[i].open = true;
             t->fds[i].type = FD_FILE;

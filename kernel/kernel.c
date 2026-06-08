@@ -197,9 +197,10 @@ void kernel_main(const struct os_boot_info *boot_info)
 			if (lsz > 0 && lsz < 4U * 1024U * 1024U) {
 				void *lbuf = kmalloc((uint32_t)lsz);
 				if (lbuf) {
-					vfs_read(lfd, lbuf, (uint32_t)lsz);
+					int64_t nread = vfs_read(lfd, lbuf, (uint32_t)lsz);
 					vfs_close(lfd);
-					launched = (process_create_from_elf(lbuf, lsz) != NULL);
+					if (nread == (int64_t)lsz)
+						launched = (process_create_from_elf(lbuf, lsz) != NULL);
 					kfree(lbuf);
 				} else {
 					vfs_close(lfd);

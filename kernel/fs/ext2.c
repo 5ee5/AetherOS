@@ -683,12 +683,15 @@ int64_t ext2_read(ext2_fs_t *fs, uint32_t ino, uint64_t off, void *buf, uint32_t
             break; /* triply-indirect not supported */
         }
 
-        if (block_no == 0) break;
-        if (!read_block(fs, block_no, fs->scratch)) return -1;
-
         uint32_t to_copy = fs->block_size - block_off;
         if (to_copy > remaining) to_copy = remaining;
-        memcpy(dst, fs->scratch + block_off, to_copy);
+        if (block_no == 0) {
+            /* Sparse block — implicit zeros. */
+            memset(dst, 0, to_copy);
+        } else {
+            if (!read_block(fs, block_no, fs->scratch)) return -1;
+            memcpy(dst, fs->scratch + block_off, to_copy);
+        }
         dst       += to_copy;
         cur_off   += to_copy;
         remaining -= to_copy;

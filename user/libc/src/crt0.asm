@@ -9,10 +9,9 @@ global _start
 
 _start:
     xor     rbp, rbp        ; clear frame pointer per ABI
-    pop     rdi             ; rdi = argc
+    pop     rdi             ; rdi = argc (RSP now 8 bytes off 16-byte boundary)
     mov     rsi, rsp        ; rsi = argv (RSP now -> argv[0])
-    and     rsp, -16        ; 16-byte align
-    sub     rsp, 8          ; ABI: RSP must be 16n+8 before call
+    and     rsp, -16        ; align to 16 bytes; call will subtract 8 → RSP+8 = 16n at main entry
     call    main
     mov     rdi, rax        ; exit status
     mov     rax, 60         ; SYS_EXIT
