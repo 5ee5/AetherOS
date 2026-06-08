@@ -43,6 +43,10 @@ debugfs -w "$IMG?offset=${EXT2_OFFSET}" -R "mkdir bin" 2>/dev/null
 if [ -f build/hello.elf ]; then
     debugfs -w "$IMG?offset=${EXT2_OFFSET}" -R "write build/hello.elf bin/hello" 2>/dev/null
 fi
+if [ -f build/shell.elf ]; then
+    debugfs -w "$IMG?offset=${EXT2_OFFSET}" \
+        -R "write build/shell.elf bin/shell" 2>/dev/null
+fi
 for prog in ls cat wc uname pwd mkdir rm cp wget grep touch head tail sort find login whoami id passwd useradd sudo; do
     if [ -f "build/bin/${prog}.elf" ]; then
         debugfs -w "$IMG?offset=${EXT2_OFFSET}" \
