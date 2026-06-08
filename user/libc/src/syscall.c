@@ -82,9 +82,25 @@ pid_t waitpid(pid_t pid, int *status, int options)
     return (pid_t)__sc3(61, (long)pid, (long)status, (long)options);
 }
 
+uid_t getuid(void)  { return (uid_t)__sc1(102, 0); }
+gid_t getgid(void)  { return (gid_t)__sc1(104, 0); }
+int   setuid(uid_t uid) { return (int)__sc1(105, (long)uid); }
+int   setgid(gid_t gid) { return (int)__sc1(106, (long)gid); }
+
 pid_t spawn(const char *path, char **argv)
 {
-    return (pid_t)__sc2(500, (long)path, (long)argv);
+    /* Pass -1 for stdin/stdout override args so no fd inheritance occurs. */
+    return (pid_t)__sc4(500, (long)path, (long)argv, -1L, -1L);
+}
+
+pid_t spawn_as(const char *path, char **argv, uid_t uid, gid_t gid)
+{
+    return (pid_t)__sc4(501, (long)path, (long)argv, (long)uid, (long)gid);
+}
+
+int pipe(int pipefd[2])
+{
+    return (int)__sc1(22, (long)pipefd);
 }
 
 long listdir(const char *path, char *buf, long bufsz)

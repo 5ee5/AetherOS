@@ -38,7 +38,7 @@ struct process *process_create_from_result(const elf_load_result_t *r)
     proc->wait_queue  = NULL;
     proc->cwd[0] = '/'; proc->cwd[1] = '\0';
     fd_table_init(&proc->fds);
-    cred_init(&proc->cred, 1000, 1000);
+    cred_init(&proc->cred, 0, 0);
     proc->thread = thread_create_user(r->entry, r->user_sp, r->cr3);
     proc->thread->process = proc;
 

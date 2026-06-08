@@ -187,10 +187,33 @@ void kernel_main(const struct os_boot_info *boot_info)
 
 	ktest_run_all();
 
-	/* Launch the interactive shell (embedded ELF binary). */
-	extern const uint8_t shell_elf_start[], shell_elf_end[];
-	process_create_from_elf(shell_elf_start,
-	    (uint64_t)(shell_elf_end - shell_elf_start));
+	/* Try loading /bin/login from ext2; fall back to the embedded shell blob. */
+	{
+		extern const uint8_t shell_elf_start[], shell_elf_end[];
+		bool launched = false;
+		int lfd = vfs_open("/bin/login");
+		if (lfd >= 0) {
+			uint64_t lsz = vfs_file_size("/bin/login");
+			if (lsz > 0 && lsz < 4U * 1024U * 1024U) {
+				void *lbuf = kmalloc((uint32_t)lsz);
+				if (lbuf) {
+					vfs_read(lfd, lbuf, (uint32_t)lsz);
+					vfs_close(lfd);
+					launched = (process_create_from_elf(lbuf, lsz) != NULL);
+					kfree(lbuf);
+				} else {
+					vfs_close(lfd);
+				}
+			} else {
+				vfs_close(lfd);
+			}
+		}
+		if (!launched) {
+			serial_write("kernel: /bin/login not found, using embedded shell\n");
+			process_create_from_elf(shell_elf_start,
+			    (uint64_t)(shell_elf_end - shell_elf_start));
+		}
+	}
 
 	/* Start the GUI desktop thread. */
 	thread_create(kernel_gui_thread, NULL);

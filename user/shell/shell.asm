@@ -12,6 +12,7 @@ DEFAULT REL
 %define SYS_PIPE    22
 %define SYS_EXIT    60
 %define SYS_WAITPID 61
+%define SYS_GETUID  102
 %define SYS_GETCWD  79
 %define SYS_CHDIR   80
 %define SYS_SPAWN   500
@@ -46,11 +47,24 @@ _start:
     lea rsi, [cwd_buf]
     call writestr
 
+    ; Choose prompt suffix based on uid (0 = root -> "# ", else "$ ")
+    mov rax, SYS_GETUID
+    syscall
+    test rax, rax
+    jnz .user_prompt
+    mov rax, SYS_WRITE
+    mov rdi, 1
+    lea rsi, [prompt_root]
+    mov rdx, prompt_root_len
+    syscall
+    jmp .prompt_done
+.user_prompt:
     mov rax, SYS_WRITE
     mov rdi, 1
     lea rsi, [prompt_suffix]
     mov rdx, prompt_suffix_len
     syscall
+.prompt_done:
 
     call readline
     test rax, rax
@@ -837,6 +851,8 @@ banner_len  equ $ - banner
 
 prompt_suffix:      db " $ "
 prompt_suffix_len   equ $ - prompt_suffix
+prompt_root:        db " # "
+prompt_root_len     equ $ - prompt_root
 
 nl:         db 10
 bs_seq:     db 8, ' ', 8
@@ -844,7 +860,7 @@ bs_seq:     db 8, ' ', 8
 clear_seq:      db 27, '[', '2', 'J', 27, '[', 'H'
 clear_seq_len   equ $ - clear_seq
 
-uname_str:      db "AetherOS 1.0 x86_64 (hobby kernel)", 10
+uname_str:      db "AetherOS 2.0 x86_64 (hobby kernel)", 10
 uname_str_len   equ $ - uname_str
 
 help_text:      db "Built-in commands:", 10

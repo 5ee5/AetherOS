@@ -17,6 +17,7 @@
 #include "sched/sched.h"
 #include "sched/thread.h"
 #include "os/socket.h"
+#include "security/cred.h"
 
 #define IA32_EFER  0xc0000080U
 #define IA32_STAR  0xc0000081U
@@ -80,11 +81,14 @@ void syscall_init(void)
 #define SYS_CONNECT  42U
 #define SYS_SEND     44U
 #define SYS_RECV     45U
-#define SYS_PIPE    22U
-#define SYS_SPAWN   500U
-#define SYS_LISTDIR 600U
-#define SYS_CREAT   601U
-#define SYS_DNS     602U
+#define SYS_PIPE      22U
+#define SYS_SETUID   105U
+#define SYS_SETGID   106U
+#define SYS_SPAWN    500U
+#define SYS_SPAWN_AS 501U
+#define SYS_LISTDIR  600U
+#define SYS_CREAT    601U
+#define SYS_DNS      602U
 
 static fd_table_t *current_fds(void);
 
@@ -382,6 +386,13 @@ static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
     struct process *proc = process_create_from_result(&result);
     if (!proc) return -1;
 
+    /* Inherit credentials from parent. */
+    {
+        struct thread *ct = sched_current();
+        struct process *parent = ct ? (struct process *)ct->process : NULL;
+        if (parent) proc->cred = parent->cred;
+    }
+
     /* Inherit pipe ends from parent into child at fd 0 (stdin) / fd 1 (stdout). */
     fd_table_t *parent_fds = current_fds();
     if (parent_fds) {
@@ -399,6 +410,47 @@ static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
         }
     }
     return (int64_t)proc->pid;
+}
+
+static int64_t sys_setuid(uint64_t uid)
+{
+    struct thread *t = sched_current();
+    struct process *p = t ? (struct process *)t->process : NULL;
+    if (!p) return -1;
+    if (p->cred.euid != 0 && p->cred.uid != (uint32_t)uid) return -1; /* EPERM */
+    p->cred.uid = p->cred.euid = (uint32_t)uid;
+    return 0;
+}
+
+static int64_t sys_setgid(uint64_t gid)
+{
+    struct thread *t = sched_current();
+    struct process *p = t ? (struct process *)t->process : NULL;
+    if (!p) return -1;
+    if (p->cred.egid != 0 && p->cred.gid != (uint32_t)gid) return -1;
+    p->cred.gid = p->cred.egid = (uint32_t)gid;
+    return 0;
+}
+
+/* sys_spawn_as: root-only; spawns child with specified uid/gid.
+   Login uses this to start the shell as the logged-in user without
+   dropping its own privileges. */
+static int64_t sys_spawn_as(uint64_t path_virt, uint64_t argv_virt,
+                             uint64_t child_uid, uint64_t child_gid)
+{
+    struct thread *ct = sched_current();
+    struct process *caller = ct ? (struct process *)ct->process : NULL;
+    if (!caller || caller->cred.euid != 0) return -1; /* EPERM */
+
+    int64_t pid = sys_spawn(path_virt, argv_virt, -1, -1);
+    if (pid < 0) return pid;
+
+    struct process *child = process_find((uint32_t)pid);
+    if (child) {
+        child->cred.uid  = child->cred.euid  = (uint32_t)child_uid;
+        child->cred.gid  = child->cred.egid  = (uint32_t)child_gid;
+    }
+    return pid;
 }
 
 static int64_t sys_pipe(uint64_t pipefd_virt)
@@ -540,8 +592,11 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_GETGID:  { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.gid  : 0; }
     case SYS_GETEUID: { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.euid : 0; }
     case SYS_GETEGID: { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.egid : 0; }
-    case SYS_PIPE:    return sys_pipe(a0);
-    case SYS_SPAWN:   return sys_spawn(a0, a1, (int64_t)a2, (int64_t)a3);
+    case SYS_SETUID:    return sys_setuid(a0);
+    case SYS_SETGID:    return sys_setgid(a0);
+    case SYS_PIPE:      return sys_pipe(a0);
+    case SYS_SPAWN:     return sys_spawn(a0, a1, (int64_t)a2, (int64_t)a3);
+    case SYS_SPAWN_AS:  return sys_spawn_as(a0, a1, a2, a3);
     case SYS_LISTDIR: return sys_listdir(a0, a1, a2);
     case SYS_CREAT:   return sys_creat(a0);
     case SYS_MKDIR:   return sys_mkdir(a0);
