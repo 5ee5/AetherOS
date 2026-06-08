@@ -12,7 +12,7 @@ A hobby x86-64 operating system written from scratch in C and NASM assembly. Boo
 
 **Preemptive round-robin scheduler** — the APIC timer fires at ~1 kHz. The timer ISR saves all 15 GP registers, calls the C scheduler to pick the next thread, and `iretq`s into it. Threads get 64 KiB kernel stacks; user threads get separate user stacks and switch address spaces on context switch.
 
-**User-space processes** — ELF64 executables are loaded into per-process address spaces (ring 3). System calls go through `SYSCALL`/`SYSRET` with `swapgs` for per-CPU kernel stack switching. Syscalls: `read`, `write`, `open` (O_CREAT/O_TRUNC), `close`, `exit`, `waitpid`, `getpid`, `spawn`, `listdir`, `mkdir`, `unlink`, `chdir`, `getcwd`.
+**User-space processes** — ELF64 executables are loaded into per-process address spaces (ring 3). System calls go through `SYSCALL`/`SYSRET` with `swapgs` for per-CPU kernel stack switching. Syscalls: `read`, `write`, `open` (O_CREAT/O_TRUNC), `close`, `exit`, `waitpid`, `getpid`, `spawn`, `listdir`, `mkdir`, `unlink`, `chdir`, `getcwd`, `socket`, `connect`, `send`, `recv`, `dns_resolve`.
 
 **Writable ext2 filesystem** — full read/write ext2 support including block/inode allocation, directory mutation (`create`, `mkdir`, `unlink`), and file truncation. The VFS layer exposes all operations to user processes. Data is persisted in a GPT disk image via an AHCI driver.
 
@@ -22,7 +22,7 @@ A hobby x86-64 operating system written from scratch in C and NASM assembly. Boo
 
 **Desktop GUI** — a graphical desktop runs on the GOP linear framebuffer with an 8×16 bitmap font, a desktop compositor, floating windows, a clock, and a live kernel log window that mirrors serial output.
 
-**Networking** — e1000 NIC driver, ARP, DHCP, IPv4, ICMP, UDP, DNS (client) — all implemented in-kernel. Userland socket API planned for v1.1.
+**Networking** — e1000 NIC driver, ARP, DHCP, IPv4, ICMP, UDP, DNS, TCP — implemented in-kernel and exposed to userland via socket syscalls (`socket`, `connect`, `send`, `recv`, `dns_resolve`). `/bin/wget` performs real HTTP GET requests over TCP.
 
 ## Features at a glance
 
@@ -34,10 +34,10 @@ A hobby x86-64 operating system written from scratch in C and NASM assembly. Boo
 | Scheduling | Preemptive round-robin, APIC timer ~1 kHz |
 | Processes | Per-process PML4, ring-3 user mode, SYSCALL/SYSRET |
 | Filesystem | GPT + ext2 (read+write) over AHCI (SATA), VFS abstraction |
-| Networking | e1000 NIC, ARP, DHCP, IPv4, ICMP, UDP, DNS (in-kernel) |
+| Networking | e1000 NIC, ARP, DHCP, IPv4, ICMP, UDP, DNS, TCP — socket syscalls exposed to userland |
 | GUI | Framebuffer desktop, 8×16 font, windows, live kernel log |
 | Shell | `cd`/`pwd`/`ls`/`cat`/`echo`/`>` + ELF programs from disk |
-| Userland | `ls`, `cat`, `wc`, `uname`, `cp`, `rm`, `mkdir`, `pwd` via tinylibc |
+| Userland | `ls`, `cat`, `wc`, `uname`, `cp`, `rm`, `mkdir`, `pwd`, `wget` via tinylibc |
 | Sync | Spinlocks, mutexes with wait queues |
 | ACPI | RSDP → RSDT/XSDT → MADT parsing for LAPIC/IOAPIC discovery |
 | Input | PS/2 keyboard driver with IRQ-driven scancode handling |
@@ -82,6 +82,10 @@ hello world
 / $ /bin/wc testdir/copy.txt
 1 2 12
 / $ rm testdir/hello.txt
+/ $ wget http://example.com/
+Resolving example.com...
+Connecting to 93.184.216.34:80...
+<!doctype html>...
 / $ exit
 ```
 

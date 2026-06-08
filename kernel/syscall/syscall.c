@@ -9,10 +9,13 @@
 #include "lib/string.h"
 #include "mem/heap.h"
 #include "mem/vmm.h"
+#include "net/dns.h"
+#include "net/socket.h"
 #include "proc/fd.h"
 #include "proc/process.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
+#include "os/socket.h"
 
 #define IA32_EFER  0xc0000080U
 #define IA32_STAR  0xc0000081U
@@ -72,9 +75,14 @@ void syscall_init(void)
 #define SYS_CHDIR    80U
 #define SYS_MKDIR    83U
 #define SYS_UNLINK   87U
+#define SYS_SOCKET   41U
+#define SYS_CONNECT  42U
+#define SYS_SEND     44U
+#define SYS_RECV     45U
 #define SYS_SPAWN   500U
 #define SYS_LISTDIR 600U
 #define SYS_CREAT   601U
+#define SYS_DNS     602U
 
 static fd_table_t *current_fds(void);
 
@@ -89,9 +97,15 @@ static int64_t sys_write(uint64_t fd, uint64_t buf_virt, uint64_t count)
         return (int64_t)count;
     }
 
-    /* Route to VFS for file fds. */
     fd_table_t *fds = current_fds();
-    if (!fds) return -9; /* EBADF */
+    if (!fds) return -9;
+
+    fd_type_t type = fd_type(fds, (int)fd);
+    if (type == FD_SOCKET) {
+        int idx = fd_id(fds, (int)fd);
+        return (int64_t)sock_send(idx, p, (uint32_t)count);
+    }
+
     int vfd = fd_to_vfs(fds, (int)fd);
     if (vfd < 0) return -9;
     return vfs_write(vfd, p, (uint32_t)count);
@@ -146,8 +160,22 @@ static int64_t sys_read(uint64_t fd, uint64_t buf_virt, uint64_t count)
     if (buf_virt + count < buf_virt || buf_virt + count > 0x800000000000ULL) return -14;
     void *buf = (void *)(uintptr_t)buf_virt;
     if (fd == 0) return sys_read_stdin(buf, (uint32_t)count);
+
     fd_table_t *fds = current_fds();
     if (!fds) return -9;
+
+    fd_type_t type = fd_type(fds, (int)fd);
+    if (type == FD_SOCKET) {
+        int idx = fd_id(fds, (int)fd);
+        /* Spin until data arrives or connection closes. */
+        int n;
+        while ((n = sock_recv(idx, buf, (uint32_t)count)) == 0) {
+            if (!sock_is_connected(idx)) return 0; /* EOF */
+            __asm__ volatile("int $0x20" ::: "memory"); /* yield */
+        }
+        return (int64_t)n;
+    }
+
     int vfd = fd_to_vfs(fds, (int)fd);
     if (vfd < 0) return -9;
     return vfs_read(vfd, buf, (uint32_t)count);
@@ -157,6 +185,14 @@ static int64_t sys_close(uint64_t fd)
 {
     fd_table_t *fds = current_fds();
     if (!fds) return -9;
+
+    fd_type_t type = fd_type(fds, (int)fd);
+    if (type == FD_SOCKET) {
+        sock_close(fd_id(fds, (int)fd));
+        fd_free(fds, (int)fd);
+        return 0;
+    }
+
     int vfd = fd_to_vfs(fds, (int)fd);
     if (vfd < 0) return -9;
     vfs_close(vfd);
@@ -334,10 +370,78 @@ static int64_t sys_getcwd(uint64_t buf_virt, uint64_t size)
     return -1;
 }
 
+/* ---- Socket syscalls ------------------------------------------------------- */
+
+static int64_t sys_socket(uint64_t domain, uint64_t type, uint64_t proto)
+{
+    (void)domain; (void)type; (void)proto; /* TCP only */
+    fd_table_t *fds = current_fds();
+    if (!fds) return -9;
+    int idx = sock_alloc();
+    if (idx < 0) return -24; /* EMFILE */
+    int fd = fd_alloc_socket(fds, idx);
+    if (fd < 0) { sock_free(idx); return -24; }
+    return fd;
+}
+
+static int64_t sys_connect(uint64_t fd, uint64_t addr_virt, uint64_t addrlen)
+{
+    (void)addrlen;
+    if (addr_virt >= 0x800000000000ULL) return -14;
+    fd_table_t *fds = current_fds();
+    if (!fds) return -9;
+    if (fd_type(fds, (int)fd) != FD_SOCKET) return -9;
+    int idx = fd_id(fds, (int)fd);
+
+    const struct sockaddr_in *sa = (const struct sockaddr_in *)(uintptr_t)addr_virt;
+    uint16_t port = (uint16_t)((sa->sin_port >> 8) | (sa->sin_port << 8)); /* ntohs */
+    return (int64_t)sock_connect(idx, sa->sin_addr, port);
+}
+
+static int64_t sys_send(uint64_t fd, uint64_t buf_virt, uint64_t len, uint64_t flags)
+{
+    (void)flags;
+    if (buf_virt + len < buf_virt || buf_virt + len > 0x800000000000ULL) return -14;
+    fd_table_t *fds = current_fds();
+    if (!fds) return -9;
+    if (fd_type(fds, (int)fd) != FD_SOCKET) return -9;
+    int idx = fd_id(fds, (int)fd);
+    return (int64_t)sock_send(idx, (const void *)(uintptr_t)buf_virt, (uint32_t)len);
+}
+
+static int64_t sys_recv(uint64_t fd, uint64_t buf_virt, uint64_t len, uint64_t flags)
+{
+    (void)flags;
+    if (buf_virt + len < buf_virt || buf_virt + len > 0x800000000000ULL) return -14;
+    fd_table_t *fds = current_fds();
+    if (!fds) return -9;
+    if (fd_type(fds, (int)fd) != FD_SOCKET) return -9;
+    int idx = fd_id(fds, (int)fd);
+    void *buf = (void *)(uintptr_t)buf_virt;
+
+    int n;
+    while ((n = sock_recv(idx, buf, (uint32_t)len)) == 0) {
+        if (!sock_is_connected(idx)) return 0;
+        __asm__ volatile("int $0x20" ::: "memory");
+    }
+    return (int64_t)n;
+}
+
+static int64_t sys_dns(uint64_t host_virt, uint64_t ip_out_virt)
+{
+    if (host_virt >= 0x800000000000ULL || ip_out_virt >= 0x800000000000ULL) return -14;
+    const char *host = (const char *)(uintptr_t)host_virt;
+    uint32_t *ip_out = (uint32_t *)(uintptr_t)ip_out_virt;
+    uint32_t ip = 0;
+    if (!dns_resolve(host, &ip)) return -1;
+    *ip_out = ip;
+    return 0;
+}
+
 int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
                          uint64_t a3, uint64_t a4)
 {
-    (void)a3; (void)a4;
+    (void)a4;
     switch (nr) {
     case SYS_READ:    return sys_read(a0, a1, a2);
     case SYS_WRITE:   return sys_write(a0, a1, a2);
@@ -357,6 +461,11 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_UNLINK:  return sys_unlink(a0);
     case SYS_CHDIR:   return sys_chdir(a0);
     case SYS_GETCWD:  return sys_getcwd(a0, a1);
+    case SYS_SOCKET:  return sys_socket(a0, a1, a2);
+    case SYS_CONNECT: return sys_connect(a0, a1, a2);
+    case SYS_SEND:    return sys_send(a0, a1, a2, a3);
+    case SYS_RECV:    return sys_recv(a0, a1, a2, a3);
+    case SYS_DNS:     return sys_dns(a0, a1);
     default:
         serial_write("syscall: unknown nr=");
         serial_write_dec(nr);

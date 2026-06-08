@@ -1,4 +1,5 @@
 #include <sys/types.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #include <stdlib.h>
 
@@ -26,6 +27,16 @@ static inline long __sc3(long nr, long a0, long a1, long a2)
     register long r10 __asm__("r10") = a2;
     __asm__ volatile("syscall"
         : "=a"(r) : "0"(nr), "D"(a0), "S"(a1), "d"(r10)
+        : "rcx", "r11", "memory");
+    return r;
+}
+
+static inline long __sc4(long nr, long a0, long a1, long a2, long a3)
+{
+    long r;
+    register long _r10 __asm__("r10") = a3;
+    __asm__ volatile("syscall"
+        : "=a"(r) : "0"(nr), "D"(a0), "S"(a1), "d"(a2), "r"(_r10)
         : "rcx", "r11", "memory");
     return r;
 }
@@ -106,4 +117,29 @@ char *getcwd(char *buf, long size)
 {
     long r = __sc2(79, (long)buf, size);
     return (r >= 0) ? buf : (char *)0;
+}
+
+int socket(int domain, int type, int proto)
+{
+    return (int)__sc3(41, (long)domain, (long)type, (long)proto);
+}
+
+int connect(int fd, const struct sockaddr_in *addr, int addrlen)
+{
+    return (int)__sc3(42, (long)fd, (long)addr, (long)addrlen);
+}
+
+long send(int fd, const void *buf, long len, int flags)
+{
+    return __sc4(44, (long)fd, (long)buf, len, (long)flags);
+}
+
+long recv(int fd, void *buf, long len, int flags)
+{
+    return __sc4(45, (long)fd, (long)buf, len, (long)flags);
+}
+
+int dns_resolve(const char *hostname, uint32_t *ip_out)
+{
+    return (int)__sc2(602, (long)hostname, (long)ip_out);
 }

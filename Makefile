@@ -57,6 +57,7 @@ KERNEL_C_SRCS := \
 	kernel/net/ipv4.c \
 	kernel/net/net.c \
 	kernel/net/nic.c \
+	kernel/net/socket.c \
 	kernel/net/tcp.c \
 	kernel/net/udp.c \
 	kernel/proc/fd.c \
@@ -106,7 +107,7 @@ USER_CFLAGS := -std=c11 -ffreestanding -fno-builtin -fno-stack-protector \
                -fno-stack-check -m64 -mno-red-zone -O2 -Wall -Wextra \
                -Wno-unused-parameter -I$(LIBC_DIR)/include
 
-USER_BIN_NAMES := ls cat wc uname pwd mkdir rm cp
+USER_BIN_NAMES := ls cat wc uname pwd mkdir rm cp wget
 USER_ELFS := $(USER_BIN_NAMES:%=$(BUILD_DIR)/bin/%.elf)
 
 KERNEL_OBJS := $(KERNEL_C_SRCS:%.c=$(BUILD_DIR)/%.o) \
