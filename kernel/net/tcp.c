@@ -200,6 +200,12 @@ void tcp_close(tcp_conn_t *c)
     c->in_use = false;
 }
 
+bool tcp_is_established(tcp_conn_t *c)
+{
+    if (!c) return false;
+    return c->state == TCP_ESTABLISHED;
+}
+
 /* ---- Incoming segment handler (called from ipv4.c) ----------------------- */
 
 void tcp_input(uint32_t src_ip, uint32_t dst_ip, const void *pkt, uint16_t len)

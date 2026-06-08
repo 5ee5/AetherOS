@@ -504,13 +504,37 @@ execute:
     syscall
 
 .try_spawn:
-    ; Build argv: [cmd_path, args_string (if any), NULL]
-    mov [spawn_argv + 0],  r12         ; argv[0] = cmd path
-    mov qword [spawn_argv + 8],  0     ; argv[1] = NULL by default
-    mov qword [spawn_argv + 16], 0     ; argv[2] = NULL terminator
-    cmp byte [r13], 0
-    je .do_spawn
-    mov [spawn_argv + 8], r13          ; argv[1] = rest of line
+    ; Tokenize remaining args in line_buf and build argv[].
+    mov [spawn_argv + 0], r12      ; argv[0] = command name
+    xor r14, r14                   ; r14 = arg count (for indices 1..8)
+    mov rbx, r13                   ; rbx = scanner
+.spawn_skip_sp:
+    cmp byte [rbx], ' '
+    jne .spawn_tok_start
+    inc rbx
+    jmp .spawn_skip_sp
+.spawn_tok_start:
+    cmp byte [rbx], 0
+    je .spawn_term
+    cmp r14, 8
+    jge .spawn_term
+    lea rcx, [spawn_argv + 8]
+    mov [rcx + r14*8], rbx
+    inc r14
+.spawn_tok_end:
+    cmp byte [rbx], 0
+    je .spawn_term
+    cmp byte [rbx], ' '
+    je .spawn_null_tok
+    inc rbx
+    jmp .spawn_tok_end
+.spawn_null_tok:
+    mov byte [rbx], 0
+    inc rbx
+    jmp .spawn_skip_sp
+.spawn_term:
+    lea rcx, [spawn_argv + 8]
+    mov qword [rcx + r14*8], 0     ; NULL-terminate argv
 .do_spawn:
     mov rax, SYS_SPAWN
     mov rdi, r12
@@ -599,6 +623,6 @@ ch_buf:     resb 1
 cat_buf:    resb CAT_BUF_SZ
 ls_buf:     resb LS_BUF_SZ
 cwd_buf:    resb CWD_BUF_SZ
-spawn_argv: resq 3
+spawn_argv: resq 10
 
 section .note.GNU-stack noalloc noexec nowrite progbits

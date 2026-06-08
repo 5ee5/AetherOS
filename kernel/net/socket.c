@@ -39,6 +39,7 @@ int sock_recv(int idx, void *buf, uint32_t len)
     if (idx < 0 || idx >= MAX_SOCKETS || !s_socks[idx]) return -1;
     if (len > 65535) len = 65535;
     uint16_t n = tcp_recv(s_socks[idx], buf, (uint16_t)len);
+    if (n == 0 && !tcp_is_established(s_socks[idx])) return -1; /* EOF */
     return (int)n;
 }
 

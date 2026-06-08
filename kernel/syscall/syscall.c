@@ -167,12 +167,10 @@ static int64_t sys_read(uint64_t fd, uint64_t buf_virt, uint64_t count)
     fd_type_t type = fd_type(fds, (int)fd);
     if (type == FD_SOCKET) {
         int idx = fd_id(fds, (int)fd);
-        /* Spin until data arrives or connection closes. */
         int n;
-        while ((n = sock_recv(idx, buf, (uint32_t)count)) == 0) {
-            if (!sock_is_connected(idx)) return 0; /* EOF */
-            __asm__ volatile("int $0x20" ::: "memory"); /* yield */
-        }
+        while ((n = sock_recv(idx, buf, (uint32_t)count)) == 0)
+            __asm__ volatile("int $0x20" ::: "memory");
+        if (n < 0) return 0; /* EOF */
         return (int64_t)n;
     }
 
@@ -420,10 +418,9 @@ static int64_t sys_recv(uint64_t fd, uint64_t buf_virt, uint64_t len, uint64_t f
     void *buf = (void *)(uintptr_t)buf_virt;
 
     int n;
-    while ((n = sock_recv(idx, buf, (uint32_t)len)) == 0) {
-        if (!sock_is_connected(idx)) return 0;
+    while ((n = sock_recv(idx, buf, (uint32_t)len)) == 0)
         __asm__ volatile("int $0x20" ::: "memory");
-    }
+    if (n < 0) return 0; /* EOF */
     return (int64_t)n;
 }
 
