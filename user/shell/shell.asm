@@ -404,7 +404,7 @@ execute:
 
 section .data
 
-banner:     db "AetherOS shell v0.6 — type 'help' for commands", 10
+banner:     db "AetherOS shell v0.7 — type 'help' for commands", 10
 banner_len  equ $ - banner
 
 prompt:     db "$ "
@@ -415,7 +415,7 @@ bs_seq:     db 8, ' ', 8       ; backspace erase sequence
 clear_seq:      db 27, '[', '2', 'J', 27, '[', 'H'
 clear_seq_len   equ $ - clear_seq
 
-uname_str:      db "AetherOS 0.6 x86_64 (hobby kernel)", 10
+uname_str:      db "AetherOS 0.7 x86_64 (hobby kernel)", 10
 uname_str_len   equ $ - uname_str
 
 help_text:      db "Built-in commands:", 10

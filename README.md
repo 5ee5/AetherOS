@@ -30,11 +30,15 @@ A hobby x86-64 operating system written from scratch in C and NASM assembly. Boo
 | Scheduling | Preemptive round-robin, APIC timer ~1 kHz |
 | Processes | Per-process PML4, ring-3 user mode, SYSCALL/SYSRET |
 | Filesystem | GPT + ext2 over AHCI (SATA), VFS abstraction |
-| Networking | e1000 NIC driver, ARP, DHCP, IPv4, ICMP, UDP, TCP (basic) |
+| Networking | e1000 NIC driver, ARP, DHCP, IPv4, ICMP, UDP, TCP, DNS |
 | GUI | Linear framebuffer, 8×16 bitmap font, desktop + windows |
 | Shell | Interactive serial shell, built-ins + ext2-resident ELF programs |
 | Userland | `ls`, `cat`, `wc`, `uname` as real C ELF binaries via tinylibc |
 | Sync | Spinlocks, mutexes with wait queues |
+| ACPI | RSDP → RSDT/XSDT → MADT parsing for LAPIC/IOAPIC discovery |
+| Storage | GPT partition table parser, AHCI (SATA) block driver |
+| Input | PS/2 keyboard driver with IRQ-driven scancode handling |
+| Security | Per-process UID/GID/EUID/EGID credentials (`getuid` etc.) |
 
 ## Building
 
@@ -58,7 +62,7 @@ make run-qemu
 QEMU launches with `-serial stdio` and `-display none`. Type commands directly in the terminal:
 
 ```
-AetherOS shell v0.6 — type 'help' for commands
+AetherOS shell v0.7 — type 'help' for commands
 $ help
 $ ls /bin
 $ /bin/uname

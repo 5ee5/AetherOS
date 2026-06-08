@@ -51,7 +51,7 @@ static void draw_taskbar(void)
 
     /* OS name */
     fb_draw_string(8, ty + (TASKBAR_H - FONT_H) / 2,
-                   "ClaudeOS v0.5", COL_ACCENT, COL_TASKBAR_BG);
+                   "AetherOS v0.7", COL_ACCENT, COL_TASKBAR_BG);
 }
 
 static void draw_clock(void)
@@ -162,7 +162,7 @@ void desktop_init(void)
     if (s_log) {
         s_log->fg = 0xFF89DCEBU;
         win_draw(s_log);
-        win_print(s_log, "ClaudeOS kernel log\n");
+        win_print(s_log, "AetherOS kernel log\n");
         win_print(s_log, "====================\n");
         win_print(s_log, "All systems nominal.\n");
     }
@@ -175,13 +175,13 @@ void desktop_init(void)
     }
 
     /* "About" window */
-    window_t *about = win_create("About ClaudeOS",
+    window_t *about = win_create("About AetherOS",
                                   (int)s_scr_w / 2 - 180, (int)s_scr_h / 2 - 80,
                                   360, 160);
     if (about) {
         about->fg = 0xFFF38BA8U;
         win_draw(about);
-        win_print(about, "  ClaudeOS v0.5 - Milestone 5\n");
+        win_print(about, "  AetherOS v0.7\n");
         win_print(about, "  Built with pure C + NASM\n");
         win_print(about, "  UEFI boot, x86-64, SMP\n");
         win_print(about, "  Network, VFS, GUI\n");
