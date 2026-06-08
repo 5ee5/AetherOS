@@ -16,6 +16,11 @@ DEFAULT REL
 %define SYS_SPAWN   500
 %define SYS_LISTDIR 600
 
+; open flags
+%define O_WRONLY    1
+%define O_CREAT     0x40
+%define O_TRUNC     0x200
+
 %define LINE_MAX    256
 %define CAT_BUF_SZ  4096
 %define LS_BUF_SZ   4096
@@ -252,7 +257,86 @@ execute:
     mov rdi, r12
     call streq
     jnz .try_cat
-    ; Write args + newline
+
+    ; Scan args for " > path" redirection.
+    ; r13 = start of args; scan for '>' byte.
+    mov rcx, r13
+.echo_scan_gt:
+    mov al, [rcx]
+    test al, al
+    jz .echo_no_redir
+    cmp al, '>'
+    je .echo_found_gt
+    inc rcx
+    jmp .echo_scan_gt
+
+.echo_found_gt:
+    ; Null-terminate the text portion (byte before '>', strip trailing space).
+    mov rbx, rcx      ; rbx = ptr to '>'
+    ; walk back over spaces before '>'
+    lea rdx, [rcx - 1]
+.echo_rtrim:
+    cmp rdx, r13
+    jbe .echo_rtrim_done
+    cmp byte [rdx], ' '
+    jne .echo_rtrim_done
+    dec rdx
+    jmp .echo_rtrim
+.echo_rtrim_done:
+    inc rdx
+    mov byte [rdx], 0   ; null-terminate text
+
+    ; Advance past '>' and spaces to get filename.
+    inc rbx
+.echo_skip_spaces_path:
+    cmp byte [rbx], ' '
+    jne .echo_open_file
+    inc rbx
+    jmp .echo_skip_spaces_path
+
+.echo_open_file:
+    ; Open (or create+truncate) the output file.
+    mov rax, SYS_OPEN
+    mov rdi, rbx
+    mov rsi, O_WRONLY | O_CREAT | O_TRUNC
+    mov rdx, 0644
+    syscall
+    cmp rax, 0
+    jl .echo_redir_fail
+    mov r14, rax        ; r14 = output fd
+
+    ; Write args to file.
+    mov rsi, r13
+    mov rdi, rsi
+    call strlen
+    test rcx, rcx
+    jz .echo_redir_nl
+    mov rax, SYS_WRITE
+    mov rdi, r14
+    mov rdx, rcx
+    syscall
+.echo_redir_nl:
+    mov rax, SYS_WRITE
+    mov rdi, r14
+    lea rsi, [nl]
+    mov rdx, 1
+    syscall
+    ; Close the file.
+    mov rax, SYS_CLOSE
+    mov rdi, r14
+    syscall
+    jmp .ex_done
+
+.echo_redir_fail:
+    mov rax, SYS_WRITE
+    mov rdi, 1
+    lea rsi, [err_redir]
+    mov rdx, err_redir_len
+    syscall
+    jmp .ex_done
+
+.echo_no_redir:
+    ; No redirection — write args + newline to stdout.
     mov rsi, r13
     call writestr
     mov rax, SYS_WRITE
@@ -459,7 +543,7 @@ execute:
 
 section .data
 
-banner:     db "AetherOS shell v0.8 — type 'help' for commands", 10
+banner:     db "AetherOS shell v1.0 — type 'help' for commands", 10
 banner_len  equ $ - banner
 
 prompt_suffix:      db " $ "
@@ -471,7 +555,7 @@ bs_seq:     db 8, ' ', 8       ; backspace erase sequence
 clear_seq:      db 27, '[', '2', 'J', 27, '[', 'H'
 clear_seq_len   equ $ - clear_seq
 
-uname_str:      db "AetherOS 0.8 x86_64 (hobby kernel)", 10
+uname_str:      db "AetherOS 1.0 x86_64 (hobby kernel)", 10
 uname_str_len   equ $ - uname_str
 
 help_text:      db "Built-in commands:", 10
@@ -492,6 +576,9 @@ err_notfound_len    equ $ - err_notfound
 
 err_chdir:      db "cd: no such directory", 10
 err_chdir_len   equ $ - err_chdir
+
+err_redir:      db "echo: cannot open output file", 10
+err_redir_len   equ $ - err_redir
 
 cmd_echo:   db "echo", 0
 cmd_cat:    db "cat", 0

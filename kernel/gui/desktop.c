@@ -51,7 +51,7 @@ static void draw_taskbar(void)
 
     /* OS name */
     fb_draw_string(8, ty + (TASKBAR_H - FONT_H) / 2,
-                   "AetherOS v0.7", COL_ACCENT, COL_TASKBAR_BG);
+                   "AetherOS v1.0", COL_ACCENT, COL_TASKBAR_BG);
 }
 
 static void draw_clock(void)
@@ -139,10 +139,22 @@ void desktop_log(const char *s)
 
 static void flush_log(void)
 {
-    if (!s_log || s_log_len == 0) return;
-    s_log_pending[s_log_len] = '\0';
-    win_print(s_log, s_log_pending);
-    s_log_len = 0;
+    if (!s_log) return;
+
+    /* Pull new serial output from the ring buffer. */
+    char tmp[256];
+    uint32_t n = serial_log_read(tmp, sizeof(tmp) - 1);
+    if (n > 0) {
+        tmp[n] = '\0';
+        win_print(s_log, tmp);
+    }
+
+    /* Also flush any directly enqueued messages. */
+    if (s_log_len > 0) {
+        s_log_pending[s_log_len] = '\0';
+        win_print(s_log, s_log_pending);
+        s_log_len = 0;
+    }
 }
 
 /* ---- Public API ---------------------------------------------------------- */
@@ -162,9 +174,6 @@ void desktop_init(void)
     if (s_log) {
         s_log->fg = 0xFF89DCEBU;
         win_draw(s_log);
-        win_print(s_log, "AetherOS kernel log\n");
-        win_print(s_log, "====================\n");
-        win_print(s_log, "All systems nominal.\n");
     }
 
     /* Network status window */
@@ -181,7 +190,7 @@ void desktop_init(void)
     if (about) {
         about->fg = 0xFFF38BA8U;
         win_draw(about);
-        win_print(about, "  AetherOS v0.7\n");
+        win_print(about, "  AetherOS v1.0\n");
         win_print(about, "  Built with pure C + NASM\n");
         win_print(about, "  UEFI boot, x86-64, SMP\n");
         win_print(about, "  Network, VFS, GUI\n");

@@ -4,6 +4,12 @@
 
 #define COM1 0x3f8U
 
+/* Ring buffer for desktop log window. */
+#define LOG_BUF_SZ 4096U
+static char     s_log_buf[LOG_BUF_SZ];
+static uint32_t s_log_write;
+static uint32_t s_log_read;
+
 static int serial_ready;
 
 static int transmit_empty(void)
@@ -47,6 +53,25 @@ void serial_write_char(char c)
 		}
 	}
 	outb(COM1, (uint8_t)c);
+
+	/* Feed into log ring buffer (skip \r). */
+	if (c != '\r') {
+		s_log_buf[s_log_write % LOG_BUF_SZ] = c;
+		s_log_write++;
+		/* If we lapped the read pointer, advance it to drop oldest data. */
+		if (s_log_write - s_log_read > LOG_BUF_SZ)
+			s_log_read = s_log_write - LOG_BUF_SZ;
+	}
+}
+
+uint32_t serial_log_read(char *buf, uint32_t size)
+{
+	uint32_t avail = s_log_write - s_log_read;
+	if (avail > size) avail = size;
+	for (uint32_t i = 0; i < avail; i++)
+		buf[i] = s_log_buf[(s_log_read + i) % LOG_BUF_SZ];
+	s_log_read += avail;
+	return avail;
 }
 
 void serial_write(const char *text)

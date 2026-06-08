@@ -12,5 +12,9 @@ void serial_write_dec(uint64_t value);
 /* Non-blocking read from COM1 RX.  Returns 0 if no data available. */
 char serial_read_char(void);
 
+/* Copy up to `size` bytes of recent serial output (since last call) into `buf`.
+   Returns number of bytes written. Used by the desktop log window. */
+uint32_t serial_log_read(char *buf, uint32_t size);
+
 #endif
 
