@@ -18,12 +18,10 @@ jobs:
       - name: Compute next version tag
         id: tag
         run: |
-          # Find the highest vX.Y tag and bump the patch component.
           LATEST=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' | head -1)
           if [ -z "$LATEST" ]; then
             NEXT="v0.1.0"
           else
-            # Strip leading 'v', split on dots
             VER="${LATEST#v}"
             MAJOR=$(echo "$VER" | cut -d. -f1)
             MINOR=$(echo "$VER" | cut -d. -f2)
@@ -32,6 +30,7 @@ jobs:
             NEXT="v${MAJOR}.${MINOR}.$((PATCH + 1))"
           fi
           echo "tag=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "prev=$LATEST" >> "$GITHUB_OUTPUT"
           echo "Next release: $NEXT"
 
       - name: Install build dependencies
@@ -44,37 +43,39 @@ jobs:
         run: |
           TAG=${{ steps.tag.outputs.tag }}
           mkdir -p dist
-          # ESP tree (bootloader + kernel ELF)
           tar -czf dist/aetheros-${TAG}-esp.tar.gz -C build esp
-          # Kernel ELF standalone
           cp build/kernel/kernel.elf dist/aetheros-${TAG}-kernel.elf
-          # EFI application standalone
           cp build/BOOTX64.EFI dist/aetheros-${TAG}-BOOTX64.EFI
+
+      - name: Build release notes
+        run: |
+          TAG=${{ steps.tag.outputs.tag }}
+          PREV=${{ steps.tag.outputs.prev }}
+          if [ -n "$PREV" ]; then
+            CHANGES=$(git log --oneline "${PREV}..HEAD" | sed 's/^/- /')
+          else
+            CHANGES=$(git log --oneline | sed 's/^/- /')
+          fi
+          [ -z "$CHANGES" ] && CHANGES="- (no changes since last release)"
+          {
+            echo "## Changes since last release"
+            echo ""
+            echo "$CHANGES"
+            echo ""
+            echo "## Artifacts"
+            echo "- \`aetheros-${TAG}-esp.tar.gz\` — full ESP tree (drop into UEFI partition as \`EFI/\`)"
+            echo "- \`aetheros-${TAG}-kernel.elf\` — kernel ELF (higher-half, loaded by bootloader)"
+            echo "- \`aetheros-${TAG}-BOOTX64.EFI\` — UEFI bootloader application"
+          } > dist/notes.md
 
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG=${{ steps.tag.outputs.tag }}
-          # Collect commit messages since last tag for the release notes body
-          PREV=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' | head -1)
-          if [ -n "$PREV" ]; then
-            NOTES=$(git log --oneline "${PREV}..HEAD" | sed 's/^/- /')
-          else
-            NOTES=$(git log --oneline | sed 's/^/- /')
-          fi
-          [ -z "$NOTES" ] && NOTES="- (no changes since last release)"
-
           gh release create "$TAG" \
             --title "AetherOS $TAG" \
-            --notes "## Changes since last release
-
-${NOTES}
-
-## Artifacts
-- \`aetheros-${TAG}-esp.tar.gz\` — full ESP tree (drop into UEFI partition as \`EFI/\`)
-- \`aetheros-${TAG}-kernel.elf\` — kernel ELF (higher-half, loaded by bootloader)
-- \`aetheros-${TAG}-BOOTX64.EFI\` — UEFI bootloader application" \
+            --notes-file dist/notes.md \
             dist/aetheros-${TAG}-esp.tar.gz \
             dist/aetheros-${TAG}-kernel.elf \
             dist/aetheros-${TAG}-BOOTX64.EFI
