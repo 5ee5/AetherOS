@@ -3,7 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#define BUF_SZ 1024
+#define BUF_SZ 2048
 
 int main(void)
 {
@@ -18,26 +18,19 @@ int main(void)
     if (n <= 0) { printf("%u\n", uid); return 0; }
     buf[n] = '\0';
 
+    /* Format: name:password:uid:gid:home */
     char *p = buf;
     while (*p) {
         char *name = p;
-        char *c1 = strchr(p, ':');
-        if (!c1) break;
-        *c1 = '\0';
+        char *c1 = strchr(p, ':');    if (!c1) break; *c1 = '\0';
+        char *pass = c1 + 1;
+        char *c2 = strchr(pass, ':'); if (!c2) break; *c2 = '\0';
+        char *uid_s = c2 + 1;
+        char *c3 = strchr(uid_s, ':'); if (!c3) break; *c3 = '\0';
+        char *rest = c3 + 1;
+        char *nl = strchr(rest, '\n'); if (nl) *nl = '\0';
 
-        char *uid_s = c1 + 1;
-        char *c2 = strchr(uid_s, ':');
-        if (!c2) break;
-        *c2 = '\0';
-
-        char *rest = c2 + 1;
-        char *nl = strchr(rest, '\n');
-        if (nl) *nl = '\0';
-
-        if ((uid_t)atoi(uid_s) == uid) {
-            puts(name);
-            return 0;
-        }
+        if ((uid_t)atoi(uid_s) == uid) { puts(name); return 0; }
 
         p = nl ? nl + 1 : rest + strlen(rest);
     }
