@@ -11,6 +11,17 @@ static int transmit_empty(void)
 	return (inb(COM1 + 5U) & 0x20U) != 0;
 }
 
+static int receive_ready(void)
+{
+	return (inb(COM1 + 5U) & 0x01U) != 0;
+}
+
+char serial_read_char(void)
+{
+	if (!serial_ready || !receive_ready()) return 0;
+	return (char)inb(COM1);
+}
+
 void serial_init(void)
 {
 	outb(COM1 + 1U, 0x00);

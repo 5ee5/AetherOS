@@ -7,3 +7,11 @@ build/
 *.img
 *.map
 
+# Internal dev / AI tooling files
+CLAUDE.md
+TASKS.md
+ROADMAP.md
+ARCHITECTURE.md
+CHANGELOG.md
+KNOWN_LIMITATIONS.md
+
