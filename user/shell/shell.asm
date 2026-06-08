@@ -1,4 +1,4 @@
-; ClaudeOS interactive shell
+; AetherOS interactive shell
 ; Assembled with: nasm -f elf64 -o build/shell.o user/shell/shell.asm
 ; Linked with:    ld -m elf_x86_64 -Ttext=0x400000 -e _start --build-id=none -o build/shell.elf build/shell.o
 
@@ -75,8 +75,10 @@ readline:
     cmp rax, 0x7f
     je .backspace
 
-    ; Newline?
+    ; Newline? (LF or CR — kernel normalizes CR to LF, but handle both)
     cmp rax, 10
+    je .newline
+    cmp rax, 13
     je .newline
 
     ; Ignore other control chars
@@ -363,14 +365,20 @@ execute:
     syscall
 
 .try_spawn:
-    ; Restore space after cmd (if we null-terminated it)
-    ; Doesn't matter — r12 is the full path to spawn
+    ; Build argv: [cmd_path, args_string (if any), NULL]
+    mov [spawn_argv + 0],  r12         ; argv[0] = cmd path
+    mov qword [spawn_argv + 8],  0     ; argv[1] = NULL by default
+    mov qword [spawn_argv + 16], 0     ; argv[2] = NULL terminator
+    cmp byte [r13], 0
+    je .do_spawn
+    mov [spawn_argv + 8], r13          ; argv[1] = rest of line
+.do_spawn:
     mov rax, SYS_SPAWN
     mov rdi, r12
+    lea rsi, [spawn_argv]
     syscall
     cmp rax, 0
     jl .spawn_fail
-    ; sys_waitpid(pid, 0, 0)
     mov rdi, rax
     mov rax, SYS_WAITPID
     xor rsi, rsi
@@ -396,7 +404,7 @@ execute:
 
 section .data
 
-banner:     db "ClaudeOS shell v0.6 — type 'help' for commands", 10
+banner:     db "AetherOS shell v0.6 — type 'help' for commands", 10
 banner_len  equ $ - banner
 
 prompt:     db "$ "
@@ -407,7 +415,7 @@ bs_seq:     db 8, ' ', 8       ; backspace erase sequence
 clear_seq:      db 27, '[', '2', 'J', 27, '[', 'H'
 clear_seq_len   equ $ - clear_seq
 
-uname_str:      db "ClaudeOS 0.6 x86_64 (hobby kernel)", 10
+uname_str:      db "AetherOS 0.6 x86_64 (hobby kernel)", 10
 uname_str_len   equ $ - uname_str
 
 help_text:      db "Built-in commands:", 10
@@ -440,5 +448,6 @@ line_buf:   resb LINE_MAX
 ch_buf:     resb 1
 cat_buf:    resb CAT_BUF_SZ
 ls_buf:     resb LS_BUF_SZ
+spawn_argv: resq 3
 
 section .note.GNU-stack noalloc noexec nowrite progbits

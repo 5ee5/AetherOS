@@ -4,8 +4,9 @@
 #include <stdint.h>
 
 #include "core/serial.h"
-#include "drivers/ps2kbd.h"
+#include "exec/elf.h"
 #include "fs/vfs.h"
+#include "lib/string.h"
 #include "mem/heap.h"
 #include "mem/vmm.h"
 #include "proc/fd.h"
@@ -113,16 +114,17 @@ static int64_t sys_read_stdin(void *buf, uint32_t count)
     uint8_t *p = (uint8_t *)buf;
     uint32_t n = 0;
     while (n < count) {
-        __asm__ volatile("sti" ::: "memory");
-        char c = ps2kbd_getchar();
+        __asm__ volatile("sti" ::: "memory");   /* allow timer IRQ so int $0x20 yields */
+        char c = serial_read_char();
         if (!c) {
-            struct thread *t = sched_current();
-            ps2kbd_set_stdin_waiter(t);
-            t->state = THREAD_BLOCKED;
-            __asm__ volatile("cli; int $0x20; sti" ::: "memory");
+            __asm__ volatile("int $0x20" ::: "memory");  /* yield, stay READY */
             continue;
         }
-        __asm__ volatile("cli" ::: "memory");
+        if (c == '\r') c = '\n';
+        if (c == 4) {            /* Ctrl+D = EOF */
+            if (n > 0) break;
+            return 0;
+        }
         p[n++] = (uint8_t)c;
         if (c == '\n') break;
     }
@@ -204,10 +206,14 @@ static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
     return (int64_t)pid;
 }
 
-static int64_t sys_spawn(uint64_t path_virt)
+#define MAX_SPAWN_ARGS 16
+#define MAX_ARG_LEN    256
+
+static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt)
 {
     if (path_virt >= 0x800000000000ULL) return -14;
     const char *path = (const char *)(uintptr_t)path_virt;
+
     uint64_t fsize = vfs_file_size(path);
     if (fsize == UINT64_MAX || fsize == 0 || fsize > 4U * 1024U * 1024U) return -2;
     void *buf = kmalloc((uint32_t)fsize);
@@ -216,8 +222,66 @@ static int64_t sys_spawn(uint64_t path_virt)
     if (vfd < 0) { kfree(buf); return -2; }
     vfs_read(vfd, buf, (uint32_t)fsize);
     vfs_close(vfd);
-    struct process *proc = process_create_from_elf(buf, fsize);
+
+    elf_load_result_t result;
+    if (!elf_load(buf, fsize, &result)) { kfree(buf); return -1; }
     kfree(buf);
+
+    /* Copy argv strings from user space into kernel buffers. */
+    static char arg_store[MAX_SPAWN_ARGS][MAX_ARG_LEN];
+    int argc = 0;
+    if (argv_virt && argv_virt < 0x800000000000ULL) {
+        uint64_t *argv = (uint64_t *)(uintptr_t)argv_virt;
+        while (argc < MAX_SPAWN_ARGS) {
+            uint64_t p = argv[argc];
+            if (!p || p >= 0x800000000000ULL) break;
+            const char *src = (const char *)(uintptr_t)p;
+            uint32_t len = 0;
+            while (len < MAX_ARG_LEN - 1U && src[len]) len++;
+            memcpy(arg_store[argc], src, len);
+            arg_store[argc][len] = '\0';
+            argc++;
+        }
+    }
+
+    /* Write ABI initial stack into child's address space.
+       Switch to the child's CR3 so user virtual addresses are accessible.
+       Kernel half is identical (copied at vmm_space_create time). */
+    uint64_t old_cr3 = vmm_pml4_phys();
+    vmm_space_switch(result.cr3);
+
+    uint64_t sp = result.user_sp;  /* 0x7ffffffffffff0 */
+
+    /* Pack strings from top downward. */
+    uint64_t str_ptrs[MAX_SPAWN_ARGS];
+    for (int i = argc - 1; i >= 0; i--) {
+        uint32_t len = (uint32_t)strlen(arg_store[i]) + 1U;
+        sp -= len;
+        sp &= ~7ULL;
+        memcpy((void *)(uintptr_t)sp, arg_store[i], len);
+        str_ptrs[i] = sp;
+    }
+
+    sp &= ~0xfULL;     /* 16-byte align before pointer array */
+
+    /* NULL sentinel at end of argv. */
+    sp -= 8;
+    *(uint64_t *)(uintptr_t)sp = 0;
+
+    /* argv pointers (argv[argc-1] … argv[0], so [0] is at the top). */
+    for (int i = argc - 1; i >= 0; i--) {
+        sp -= 8;
+        *(uint64_t *)(uintptr_t)sp = str_ptrs[i];
+    }
+
+    /* argc value — crt0 does `pop rdi` to read it. */
+    sp -= 8;
+    *(uint64_t *)(uintptr_t)sp = (uint64_t)argc;
+
+    vmm_space_switch(old_cr3);
+
+    result.user_sp = sp;
+    struct process *proc = process_create_from_result(&result);
     return proc ? (int64_t)proc->pid : -1;
 }
 
@@ -244,7 +308,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_GETGID:  { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.gid  : 0; }
     case SYS_GETEUID: { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.euid : 0; }
     case SYS_GETEGID: { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.egid : 0; }
-    case SYS_SPAWN:   return sys_spawn(a0);
+    case SYS_SPAWN:   return sys_spawn(a0, a1);
     case SYS_LISTDIR: return sys_listdir(a0, a1, a2);
     default:
         serial_write("syscall: unknown nr=");

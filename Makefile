@@ -95,11 +95,25 @@ HELLO_ELF := $(BUILD_DIR)/hello.elf
 SHELL_ELF := $(BUILD_DIR)/shell.elf
 DISK_IMG := $(BUILD_DIR)/disk.img
 
+LIBC_DIR  := user/libc
+LIBC_SRCS := $(LIBC_DIR)/src/syscall.c $(LIBC_DIR)/src/stdio.c \
+             $(LIBC_DIR)/src/string.c   $(LIBC_DIR)/src/stdlib.c
+LIBC_OBJS := $(LIBC_SRCS:$(LIBC_DIR)/src/%.c=$(BUILD_DIR)/libc/%.o)
+LIBC_CRT0 := $(BUILD_DIR)/libc/crt0.o
+LIBC_A    := $(BUILD_DIR)/libc.a
+
+USER_CFLAGS := -std=c11 -ffreestanding -fno-builtin -fno-stack-protector \
+               -fno-stack-check -m64 -mno-red-zone -O2 -Wall -Wextra \
+               -Wno-unused-parameter -I$(LIBC_DIR)/include
+
+USER_BIN_NAMES := ls cat wc uname
+USER_ELFS := $(USER_BIN_NAMES:%=$(BUILD_DIR)/bin/%.elf)
+
 KERNEL_OBJS := $(KERNEL_C_SRCS:%.c=$(BUILD_DIR)/%.o) \
 	$(KERNEL_ASM_SRCS:%.asm=$(BUILD_DIR)/%.o)
 BOOT_OBJS := $(BOOT_C_SRCS:%.c=$(BUILD_DIR)/%.o)
 
-.PHONY: all clean esp iso disk check-deps run-qemu test boot-test
+.PHONY: all clean esp iso disk check-deps run-qemu test boot-test userlibc
 
 all: esp
 
@@ -152,6 +166,27 @@ $(BUILD_DIR)/user/shell/shell_blob.o: \
 	@mkdir -p $(@D)
 	$(NASM) -f elf64 $< -o $@
 
+# tinylibc
+$(BUILD_DIR)/libc/%.o: $(LIBC_DIR)/src/%.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c $< -o $@
+
+$(LIBC_CRT0): $(LIBC_DIR)/src/crt0.asm
+	@mkdir -p $(@D)
+	$(NASM) -f elf64 -o $@ $<
+
+$(LIBC_A): $(LIBC_OBJS)
+	ar rcs $@ $^
+
+# User programs
+$(BUILD_DIR)/bin/%.o: user/bin/%.c
+	@mkdir -p $(@D)
+	$(CC) $(USER_CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/bin/%.elf: $(BUILD_DIR)/bin/%.o $(LIBC_A) $(LIBC_CRT0)
+	$(LD) -m elf_x86_64 -Ttext=0x400000 -e _start --build-id=none \
+	    $(LIBC_CRT0) $< $(LIBC_A) -o $@
+
 $(KERNEL_BUILD)/kernel.elf: $(KERNEL_OBJS) kernel/linker.ld
 	@mkdir -p $(@D)
 	$(LD) $(KERNEL_LDFLAGS) -o $@ $(KERNEL_OBJS)
@@ -169,7 +204,7 @@ esp: $(BUILD_DIR)/BOOTX64.EFI $(KERNEL_BUILD)/kernel.elf
 	cp $(BUILD_DIR)/BOOTX64.EFI $(ESP_DIR)/EFI/BOOT/BOOTX64.EFI
 	cp $(KERNEL_BUILD)/kernel.elf $(ESP_DIR)/EFI/OS/KERNEL.ELF
 
-$(DISK_IMG):
+$(DISK_IMG): $(USER_ELFS)
 	./scripts/make-disk.sh
 
 disk: $(DISK_IMG)

@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "exec/elf.h"
 #include "proc/fd.h"
 #include "security/cred.h"
 
@@ -19,6 +20,9 @@ struct process {
     volatile int32_t exit_status;
     struct thread   *wait_queue;  /* threads blocked in sys_waitpid */
 };
+
+/* Create a process from an already-loaded ELF result (entry/user_sp/cr3). */
+struct process *process_create_from_result(const elf_load_result_t *r);
 
 /* Load an ELF binary and create a user-mode thread. Returns NULL on failure. */
 struct process *process_create_from_elf(const void *elf_data, uint64_t size);

@@ -21,14 +21,8 @@ struct process *process_find(uint32_t pid)
     return NULL;
 }
 
-struct process *process_create_from_elf(const void *elf_data, uint64_t size)
+struct process *process_create_from_result(const elf_load_result_t *r)
 {
-    elf_load_result_t result;
-    if (!elf_load(elf_data, size, &result)) {
-        serial_write("process: elf_load failed\n");
-        return NULL;
-    }
-
     struct process *proc = (struct process *)kmalloc(sizeof(struct process));
     if (proc == NULL) {
         serial_write("process: kmalloc failed\n");
@@ -36,16 +30,15 @@ struct process *process_create_from_elf(const void *elf_data, uint64_t size)
     }
 
     proc->pid         = next_pid++;
-    proc->cr3         = result.cr3;
+    proc->cr3         = r->cr3;
     proc->exited      = false;
     proc->exit_status = 0;
     proc->wait_queue  = NULL;
     fd_table_init(&proc->fds);
-    cred_init(&proc->cred, 1000, 1000); /* unprivileged user */
-    proc->thread = thread_create_user(result.entry, result.user_sp, result.cr3);
+    cred_init(&proc->cred, 1000, 1000);
+    proc->thread = thread_create_user(r->entry, r->user_sp, r->cr3);
     proc->thread->process = proc;
 
-    /* Register in global process table. */
     for (int i = 0; i < MAX_PROCS; ++i) {
         if (!s_procs[i]) { s_procs[i] = proc; break; }
     }
@@ -53,8 +46,18 @@ struct process *process_create_from_elf(const void *elf_data, uint64_t size)
     serial_write("process: created pid=");
     serial_write_dec(proc->pid);
     serial_write(" entry=");
-    serial_write_hex(result.entry);
+    serial_write_hex(r->entry);
     serial_write("\n");
 
     return proc;
+}
+
+struct process *process_create_from_elf(const void *elf_data, uint64_t size)
+{
+    elf_load_result_t result;
+    if (!elf_load(elf_data, size, &result)) {
+        serial_write("process: elf_load failed\n");
+        return NULL;
+    }
+    return process_create_from_result(&result);
 }
