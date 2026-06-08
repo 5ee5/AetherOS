@@ -83,6 +83,8 @@ int main(void)
 
         printf("Welcome to AetherOS, %s!\n", username);
 
+        if (home[0]) chdir(home);
+
         char *argv[] = { "shell", NULL };
         pid_t pid = spawn_as("/bin/shell", argv, uid, gid);
         if (pid < 0) {

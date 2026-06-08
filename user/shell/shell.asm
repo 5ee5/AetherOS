@@ -95,6 +95,8 @@ readline:
     je .rl_bs
     cmp rax, 0x7f
     je .rl_bs
+    cmp rax, 0x1b
+    je .rl_esc
     cmp rax, 10
     je .rl_nl
     cmp rax, 13
@@ -130,10 +132,181 @@ readline:
     mov rdx, 1
     syscall
     mov byte [line_buf + rbx], 0
+    ; Save non-empty line to history ring
+    test rbx, rbx
+    jz .rl_nl_skip_hist
+    mov r14, [hist_head]
+    shl r14, 8                  ; * 256
+    lea rdi, [history]
+    add rdi, r14
+    lea rsi, [line_buf]
+    xor rcx, rcx
+.rl_hist_save_lp:
+    mov al, [rsi + rcx]
+    mov [rdi + rcx], al
+    test al, al
+    jz .rl_hist_save_done
+    inc rcx
+    cmp rcx, 255
+    jl .rl_hist_save_lp
+    mov byte [rdi + 255], 0
+.rl_hist_save_done:
+    mov r14, [hist_head]
+    inc r14
+    cmp r14, 20
+    jl .rl_hist_head_ok
+    xor r14, r14
+.rl_hist_head_ok:
+    mov [hist_head], r14
+    mov r14, [hist_count]
+    cmp r14, 20
+    jge .rl_hist_count_ok
+    inc r14
+    mov [hist_count], r14
+.rl_hist_count_ok:
+    mov qword [hist_pos], 0
+.rl_nl_skip_hist:
     mov rax, rbx
 .rl_done:
     pop r12
     pop rbx
+    ret
+
+; ---- ESC / history navigation (inside readline local-label scope) -----------
+
+.rl_esc:
+    mov rax, SYS_READ
+    xor rdi, rdi
+    lea rsi, [ch_buf]
+    mov rdx, 1
+    syscall
+    cmp byte [ch_buf], '['
+    jne .rl_char
+    mov rax, SYS_READ
+    xor rdi, rdi
+    lea rsi, [ch_buf]
+    mov rdx, 1
+    syscall
+    cmp byte [ch_buf], 'A'
+    je .rl_hist_up
+    cmp byte [ch_buf], 'B'
+    je .rl_hist_down
+    jmp .rl_char
+
+.rl_hist_up:
+    mov r14, [hist_pos]
+    cmp r14, [hist_count]
+    jge .rl_char            ; already at oldest entry
+    inc r14
+    mov [hist_pos], r14
+    jmp .rl_hist_show
+
+.rl_hist_down:
+    mov r14, [hist_pos]
+    test r14, r14
+    jz .rl_char             ; not browsing
+    dec r14
+    mov [hist_pos], r14
+    test r14, r14
+    jz .rl_hist_clear_line
+    ; fall through to show
+
+.rl_hist_show:
+    ; slot = (hist_head - hist_pos + 20) % 20
+    mov r14, [hist_head]
+    sub r14, [hist_pos]
+    add r14, 20
+    cmp r14, 20
+    jl .rl_hist_slot_ok
+    sub r14, 20
+.rl_hist_slot_ok:
+    call erase_input
+    shl r14, 8              ; * 256
+    lea rsi, [history]
+    add rsi, r14
+    xor rbx, rbx
+.rl_hist_cp_lp:
+    mov al, [rsi + rbx]
+    mov [line_buf + rbx], al
+    test al, al
+    jz .rl_hist_cp_done
+    inc rbx
+    cmp rbx, LINE_MAX - 1
+    jl .rl_hist_cp_lp
+.rl_hist_cp_done:
+    mov byte [line_buf + rbx], 0
+    test rbx, rbx
+    jz .rl_char
+    mov rax, SYS_WRITE
+    mov rdi, 1
+    lea rsi, [line_buf]
+    mov rdx, rbx
+    syscall
+    jmp .rl_char
+
+.rl_hist_clear_line:
+    call erase_input
+    xor rbx, rbx
+    mov byte [line_buf], 0
+    jmp .rl_char
+
+; ---- erase_input -------------------------------------------------------
+; Erase rbx characters from the terminal.  Clobbers rax, rdi, rsi, rdx.
+erase_input:
+    test rbx, rbx
+    jz .ei_done
+    mov rax, SYS_WRITE
+    mov rdi, 1
+    lea rsi, [bs256]
+    mov rdx, rbx
+    syscall
+    mov rax, SYS_WRITE
+    mov rdi, 1
+    lea rsi, [sp256]
+    mov rdx, rbx
+    syscall
+    mov rax, SYS_WRITE
+    mov rdi, 1
+    lea rsi, [bs256]
+    mov rdx, rbx
+    syscall
+.ei_done:
+    ret
+
+; ---- try_bin_path ------------------------------------------------------
+; If r12 has no '/', build "/bin/<r12>" in bin_path.
+; Returns rdi = path to use.  Clobbers rsi, rcx, al.
+try_bin_path:
+    mov rdi, r12
+.tbp_scan:
+    cmp byte [rdi], 0
+    je .tbp_no_slash
+    cmp byte [rdi], '/'
+    je .tbp_has_slash
+    inc rdi
+    jmp .tbp_scan
+.tbp_has_slash:
+    mov rdi, r12
+    ret
+.tbp_no_slash:
+    lea rdi, [bin_path]
+    mov byte [rdi+0], '/'
+    mov byte [rdi+1], 'b'
+    mov byte [rdi+2], 'i'
+    mov byte [rdi+3], 'n'
+    mov byte [rdi+4], '/'
+    lea rdi, [bin_path+5]
+    mov rsi, r12
+.tbp_copy:
+    mov al, [rsi]
+    mov [rdi], al
+    test al, al
+    jz .tbp_done
+    inc rsi
+    inc rdi
+    jmp .tbp_copy
+.tbp_done:
+    lea rdi, [bin_path]
     ret
 
 ; ---- strlen -----------------------------------------------------------------
@@ -259,8 +432,8 @@ spawn_segment:
 
     pop r10         ; restore stdout_fd
     pop rdx         ; restore stdin_fd
+    call try_bin_path       ; rdi = resolved path (r12 or /bin/<r12>)
     mov rax, SYS_SPAWN
-    mov rdi, r12
     lea rsi, [spawn_argv]
     syscall
     jmp .ss_done
@@ -809,8 +982,8 @@ execute:
 .sp_term:
     lea rcx, [spawn_argv + 8]
     mov qword [rcx + r14*8], 0
+    call try_bin_path       ; rdi = resolved path (r12 or /bin/<r12>)
     mov rax, SYS_SPAWN
-    mov rdi, r12
     lea rsi, [spawn_argv]
     mov rdx, -1
     mov r10, -1
@@ -901,6 +1074,9 @@ cmd_help:   db "help", 0
 cmd_exit:   db "exit", 0
 root_path:  db "/", 0
 
+bs256: times 256 db 8
+sp256: times 256 db 32
+
 section .bss
 
 line_buf:        resb LINE_MAX
@@ -914,5 +1090,11 @@ pipe_seg_count:  resq 1
 pipe_seg_ptrs:   resq 4          ; up to 4 segment start pointers
 pipe_fd_array:   resd 6          ; 3 pipes × 2 int32 fds
 pipe_pids:       resq 4          ; PID for each segment
+
+bin_path:        resb 256
+history:         resb 256 * 20
+hist_head:       resq 1
+hist_count:      resq 1
+hist_pos:        resq 1
 
 section .note.GNU-stack noalloc noexec nowrite progbits
