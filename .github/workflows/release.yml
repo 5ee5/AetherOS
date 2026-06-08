@@ -66,6 +66,12 @@ jobs:
       - name: Build ESP tree
         run: make all
 
+      - name: Install mtools for USB image
+        run: sudo apt-get install -y mtools
+
+      - name: Build USB image
+        run: make usb
+
       - name: Package artifacts
         run: |
           TAG=${{ steps.tag.outputs.tag }}
@@ -73,6 +79,7 @@ jobs:
           tar -czf dist/aetheros-${TAG}-esp.tar.gz -C build esp
           cp build/kernel/kernel.elf dist/aetheros-${TAG}-kernel.elf
           cp build/BOOTX64.EFI dist/aetheros-${TAG}-BOOTX64.EFI
+          gzip -c build/usb.img > dist/aetheros-${TAG}-usb.img.gz
 
       - name: Build release notes
         run: |
@@ -101,6 +108,7 @@ jobs:
             echo "- \`aetheros-${TAG}-esp.tar.gz\` — full ESP tree (drop into UEFI partition as \`EFI/\`)"
             echo "- \`aetheros-${TAG}-kernel.elf\` — kernel ELF (higher-half, loaded by bootloader)"
             echo "- \`aetheros-${TAG}-BOOTX64.EFI\` — UEFI bootloader application"
+            echo "- \`aetheros-${TAG}-usb.img.gz\` — bootable USB image (write with \`dd\` or \`make flash\`)"
           } > dist/notes.md
 
       - name: Create release
@@ -113,4 +121,5 @@ jobs:
             --notes-file dist/notes.md \
             dist/aetheros-${TAG}-esp.tar.gz \
             dist/aetheros-${TAG}-kernel.elf \
-            dist/aetheros-${TAG}-BOOTX64.EFI
+            dist/aetheros-${TAG}-BOOTX64.EFI \
+            dist/aetheros-${TAG}-usb.img.gz

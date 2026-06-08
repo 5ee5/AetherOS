@@ -89,6 +89,25 @@ Connecting to 93.184.216.34:80...
 / $ exit
 ```
 
+## Running on real hardware
+
+Build a single bootable USB image and flash it to a drive:
+
+```sh
+make usb                        # produces build/usb.img (64 MiB)
+make flash DISK=/dev/sdX        # writes to USB drive — destructive
+```
+
+Or write manually:
+
+```sh
+dd if=build/usb.img of=/dev/sdX bs=4M status=progress oflag=sync
+```
+
+The image contains two GPT partitions: an ext2 data partition (filesystem + user programs) and a FAT32 EFI System Partition (bootloader + kernel ELF). Plug into any UEFI machine, disable Secure Boot, and select the USB from the boot menu.
+
+Pre-built USB images are attached to every [GitHub release](https://github.com/5ee5/AetherOS/releases) as `aetheros-vX.Y.Z-usb.img.gz`.
+
 ## Repository layout
 
 ```

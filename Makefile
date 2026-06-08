@@ -95,6 +95,7 @@ TRAMPOLINE_BIN := $(BUILD_DIR)/smp_trampoline.bin
 HELLO_ELF := $(BUILD_DIR)/hello.elf
 SHELL_ELF := $(BUILD_DIR)/shell.elf
 DISK_IMG := $(BUILD_DIR)/disk.img
+USB_IMG  := $(BUILD_DIR)/usb.img
 
 LIBC_DIR  := user/libc
 LIBC_SRCS := $(LIBC_DIR)/src/syscall.c $(LIBC_DIR)/src/stdio.c \
@@ -114,7 +115,7 @@ KERNEL_OBJS := $(KERNEL_C_SRCS:%.c=$(BUILD_DIR)/%.o) \
 	$(KERNEL_ASM_SRCS:%.asm=$(BUILD_DIR)/%.o)
 BOOT_OBJS := $(BOOT_C_SRCS:%.c=$(BUILD_DIR)/%.o)
 
-.PHONY: all clean esp iso disk check-deps run-qemu test boot-test userlibc
+.PHONY: all clean esp iso disk usb flash check-deps run-qemu test boot-test userlibc
 
 all: esp
 
@@ -209,6 +210,17 @@ $(DISK_IMG): $(USER_ELFS)
 	./scripts/make-disk.sh
 
 disk: $(DISK_IMG)
+
+$(USB_IMG): $(USER_ELFS) esp
+	./scripts/make-usb.sh
+
+usb: $(USB_IMG)
+
+flash: $(USB_IMG)
+	@test -n "$(DISK)" || (echo "usage: make flash DISK=/dev/sdX" && exit 1)
+	@echo "WARNING: this will erase $(DISK)"
+	@read -p "Continue? [y/N] " yn && [ "$$yn" = "y" ]
+	dd if=$(USB_IMG) of=$(DISK) bs=4M status=progress oflag=sync
 
 run-qemu: esp disk
 	./scripts/run-qemu.sh
