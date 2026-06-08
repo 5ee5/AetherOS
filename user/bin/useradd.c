@@ -61,6 +61,8 @@ int main(int argc, char **argv)
     snprintf(home, sizeof(home), "/home/%s", username);
     if (mkdir(home, 0) < 0) {
         printf("useradd: warning: could not create %s\n", home);
+    } else {
+        chown(home, new_uid, new_uid);
     }
 
     /* Append new entry to /etc/passwd with empty password. */

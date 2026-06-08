@@ -44,4 +44,10 @@ int vfs_chdir(const char *path);
 /* Get working directory for the current process into `buf`. */
 int vfs_getcwd(char *buf, uint32_t size);
 
+/* Return the mode and owner uid of a file. Returns 0 on success, -1 on error. */
+int vfs_file_stat(const char *path, uint16_t *out_mode, uint32_t *out_uid);
+
+/* Set the owner uid/gid of a file. Returns 0 on success, -1 on error. */
+int vfs_chown(const char *path, uint32_t uid, uint32_t gid);
+
 #endif

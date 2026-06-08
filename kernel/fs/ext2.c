@@ -1028,3 +1028,21 @@ bool ext2_unlink(ext2_fs_t *fs, const char *path)
 
     return dir_remove_entry(fs, parent_ino, name);
 }
+
+bool ext2_inode_stat(ext2_fs_t *fs, uint32_t ino, uint16_t *out_mode, uint32_t *out_uid)
+{
+    ext2_inode_t inode;
+    if (!read_inode(fs, ino, &inode)) return false;
+    if (out_mode) *out_mode = inode.i_mode;
+    if (out_uid)  *out_uid  = inode.i_uid;
+    return true;
+}
+
+bool ext2_inode_chown(ext2_fs_t *fs, uint32_t ino, uint32_t uid, uint32_t gid)
+{
+    ext2_inode_t inode;
+    if (!read_inode(fs, ino, &inode)) return false;
+    inode.i_uid = (uint16_t)uid;
+    inode.i_gid = (uint16_t)gid;
+    return write_inode(fs, ino, &inode);
+}

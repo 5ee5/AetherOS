@@ -82,6 +82,7 @@ void syscall_init(void)
 #define SYS_SEND     44U
 #define SYS_RECV     45U
 #define SYS_PIPE      22U
+#define SYS_CHOWN     92U
 #define SYS_SETUID   105U
 #define SYS_SETGID   106U
 #define SYS_SPAWN    500U
@@ -393,6 +394,15 @@ static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
         if (parent) proc->cred = parent->cred;
     }
 
+    /* Setuid: if the executable's inode has the setuid bit (04000), elevate euid. */
+    {
+        uint16_t fmode = 0; uint32_t fuid = 0;
+        if (vfs_file_stat(path, &fmode, &fuid) == 0 && (fmode & 04000U)) {
+            proc->cred.euid = fuid;
+            if (fuid == 0) proc->cred.egid = 0;
+        }
+    }
+
     /* Inherit pipe ends from parent into child at fd 0 (stdin) / fd 1 (stdout). */
     fd_table_t *parent_fds = current_fds();
     if (parent_fds) {
@@ -410,6 +420,15 @@ static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
         }
     }
     return (int64_t)proc->pid;
+}
+
+static int64_t sys_chown(uint64_t path_virt, uint64_t uid, uint64_t gid)
+{
+    if (path_virt >= 0x800000000000ULL) return -14;
+    struct thread *t = sched_current();
+    struct process *p = t ? (struct process *)t->process : NULL;
+    if (!p || p->cred.euid != 0) return -1; /* EPERM */
+    return vfs_chown((const char *)(uintptr_t)path_virt, (uint32_t)uid, (uint32_t)gid);
 }
 
 static int64_t sys_setuid(uint64_t uid)
@@ -592,6 +611,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_GETGID:  { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.gid  : 0; }
     case SYS_GETEUID: { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.euid : 0; }
     case SYS_GETEGID: { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.egid : 0; }
+    case SYS_CHOWN:     return sys_chown(a0, a1, a2);
     case SYS_SETUID:    return sys_setuid(a0);
     case SYS_SETGID:    return sys_setgid(a0);
     case SYS_PIPE:      return sys_pipe(a0);

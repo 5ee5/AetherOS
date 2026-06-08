@@ -51,4 +51,10 @@ bool ext2_unlink(ext2_fs_t *fs, const char *path);
 /* Truncate inode `ino` to zero length (frees all data blocks). */
 bool ext2_truncate(ext2_fs_t *fs, uint32_t ino);
 
+/* Read i_mode and i_uid from inode `ino`. Returns true on success. */
+bool ext2_inode_stat(ext2_fs_t *fs, uint32_t ino, uint16_t *out_mode, uint32_t *out_uid);
+
+/* Set i_uid and i_gid on inode `ino`. Returns true on success. */
+bool ext2_inode_chown(ext2_fs_t *fs, uint32_t ino, uint32_t uid, uint32_t gid);
+
 #endif

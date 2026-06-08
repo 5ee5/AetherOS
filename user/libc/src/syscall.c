@@ -86,6 +86,7 @@ uid_t getuid(void)  { return (uid_t)__sc1(102, 0); }
 gid_t getgid(void)  { return (gid_t)__sc1(104, 0); }
 int   setuid(uid_t uid) { return (int)__sc1(105, (long)uid); }
 int   setgid(gid_t gid) { return (int)__sc1(106, (long)gid); }
+int   chown(const char *path, uid_t uid, gid_t gid) { return (int)__sc3(92, (long)path, (long)uid, (long)gid); }
 
 pid_t spawn(const char *path, char **argv)
 {
