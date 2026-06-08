@@ -44,32 +44,78 @@ static void emit_long(long v)
     else emit_uint((unsigned long)v, 10, 0);
 }
 
+/* Generic formatter: writes to either stdout buffer or a bounded string buffer. */
+typedef struct {
+    char  *buf;    /* NULL → emit to stdout */
+    size_t cap;
+    size_t pos;
+} fmt_ctx_t;
+
+static void ctx_putc(fmt_ctx_t *ctx, char c)
+{
+    if (ctx->buf) {
+        if (ctx->pos + 1 < ctx->cap) ctx->buf[ctx->pos++] = c;
+    } else {
+        emit(c);
+    }
+}
+
+static void ctx_puts(fmt_ctx_t *ctx, const char *s)
+{
+    if (!s) s = "(null)";
+    while (*s) ctx_putc(ctx, *s++);
+}
+
+static void ctx_uint(fmt_ctx_t *ctx, unsigned long v, unsigned base, int upper)
+{
+    const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+    char buf[20];
+    int  i = 0;
+    if (v == 0) { ctx_putc(ctx, '0'); return; }
+    while (v) { buf[i++] = digits[v % base]; v /= base; }
+    while (i--) ctx_putc(ctx, buf[i]);
+}
+
+static void ctx_long(fmt_ctx_t *ctx, long v)
+{
+    if (v < 0) { ctx_putc(ctx, '-'); ctx_uint(ctx, (unsigned long)-v, 10, 0); }
+    else ctx_uint(ctx, (unsigned long)v, 10, 0);
+}
+
+static int vfmt(fmt_ctx_t *ctx, const char *fmt, va_list ap)
+{
+    for (const char *p = fmt; *p; p++) {
+        if (*p != '%') { ctx_putc(ctx, *p); continue; }
+        p++;
+        switch (*p) {
+        case 's': ctx_puts(ctx, va_arg(ap, const char *));           break;
+        case 'd': ctx_long(ctx, (long)va_arg(ap, int));              break;
+        case 'u': ctx_uint(ctx, (unsigned long)va_arg(ap, unsigned), 10, 0); break;
+        case 'x': ctx_uint(ctx, (unsigned long)va_arg(ap, unsigned), 16, 0); break;
+        case 'X': ctx_uint(ctx, (unsigned long)va_arg(ap, unsigned), 16, 1); break;
+        case 'l':
+            p++;
+            if (*p == 'd') ctx_long(ctx, va_arg(ap, long));
+            else if (*p == 'u') ctx_uint(ctx, (unsigned long)va_arg(ap, unsigned long), 10, 0);
+            else if (*p == 'x') ctx_uint(ctx, va_arg(ap, unsigned long), 16, 0);
+            else { ctx_putc(ctx, '%'); ctx_putc(ctx, 'l'); ctx_putc(ctx, *p); }
+            break;
+        case 'c': ctx_putc(ctx, (char)va_arg(ap, int));              break;
+        case '%': ctx_putc(ctx, '%');                                 break;
+        default:  ctx_putc(ctx, '%'); ctx_putc(ctx, *p);             break;
+        }
+    }
+    if (ctx->buf && ctx->pos < ctx->cap) ctx->buf[ctx->pos] = '\0';
+    return (int)ctx->pos;
+}
+
 int vprintf(const char *fmt, va_list ap)
 {
     s_opos = 0;
-    for (const char *p = fmt; *p; p++) {
-        if (*p != '%') { emit(*p); continue; }
-        p++;
-        switch (*p) {
-        case 's': emit_str(va_arg(ap, const char *));           break;
-        case 'd': emit_long((long)va_arg(ap, int));             break;
-        case 'u': emit_uint((unsigned long)va_arg(ap, unsigned), 10, 0); break;
-        case 'x': emit_uint((unsigned long)va_arg(ap, unsigned), 16, 0); break;
-        case 'X': emit_uint((unsigned long)va_arg(ap, unsigned), 16, 1); break;
-        case 'l':
-            p++;
-            if (*p == 'd') emit_long(va_arg(ap, long));
-            else if (*p == 'u') emit_uint((unsigned long)va_arg(ap, unsigned long), 10, 0);
-            else if (*p == 'x') emit_uint(va_arg(ap, unsigned long), 16, 0);
-            else { emit('%'); emit('l'); emit(*p); }
-            break;
-        case 'c': emit((char)va_arg(ap, int));                  break;
-        case '%': emit('%');                                     break;
-        default:  emit('%'); emit(*p);                          break;
-        }
-    }
+    fmt_ctx_t ctx = { NULL, 0, 0 };
+    int r = vfmt(&ctx, fmt, ap);
     flush();
-    return (int)s_opos;
+    return r;
 }
 
 int printf(const char *fmt, ...)
@@ -77,6 +123,36 @@ int printf(const char *fmt, ...)
     va_list ap;
     va_start(ap, fmt);
     int r = vprintf(fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+int vsprintf(char *buf, const char *fmt, va_list ap)
+{
+    fmt_ctx_t ctx = { buf, (size_t)-1, 0 };
+    return vfmt(&ctx, fmt, ap);
+}
+
+int vsnprintf(char *buf, size_t n, const char *fmt, va_list ap)
+{
+    fmt_ctx_t ctx = { buf, n, 0 };
+    return vfmt(&ctx, fmt, ap);
+}
+
+int sprintf(char *buf, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vsprintf(buf, fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+int snprintf(char *buf, size_t n, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vsnprintf(buf, n, fmt, ap);
     va_end(ap);
     return r;
 }

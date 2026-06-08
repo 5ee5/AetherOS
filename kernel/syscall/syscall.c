@@ -12,6 +12,7 @@
 #include "net/dns.h"
 #include "net/socket.h"
 #include "proc/fd.h"
+#include "proc/pipe.h"
 #include "proc/process.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
@@ -79,6 +80,7 @@ void syscall_init(void)
 #define SYS_CONNECT  42U
 #define SYS_SEND     44U
 #define SYS_RECV     45U
+#define SYS_PIPE    22U
 #define SYS_SPAWN   500U
 #define SYS_LISTDIR 600U
 #define SYS_CREAT   601U
@@ -93,6 +95,22 @@ static int64_t sys_write(uint64_t fd, uint64_t buf_virt, uint64_t count)
     const char *p = (const char *)(uintptr_t)buf_virt;
 
     if (fd == 1U || fd == 2U) {
+        /* Check if stdout is redirected to a pipe in this process. */
+        if (fd == 1U) {
+            fd_table_t *fds = current_fds();
+            if (fds && fd_type(fds, 1) == FD_PIPE_WRITE) {
+                int pidx = fd_id(fds, 1);
+                uint32_t written = 0;
+                while (written < count) {
+                    int n = pipe_write(pidx, p + written, (uint32_t)(count - written));
+                    if (n < 0) return (int64_t)written;
+                    written += (uint32_t)n;
+                    if (written < count)
+                        __asm__ volatile("int $0x20" ::: "memory"); /* yield if buffer full */
+                }
+                return (int64_t)count;
+            }
+        }
         for (uint64_t i = 0; i < count; ++i) serial_write_char(p[i]);
         return (int64_t)count;
     }
@@ -159,7 +177,17 @@ static int64_t sys_read(uint64_t fd, uint64_t buf_virt, uint64_t count)
 {
     if (buf_virt + count < buf_virt || buf_virt + count > 0x800000000000ULL) return -14;
     void *buf = (void *)(uintptr_t)buf_virt;
-    if (fd == 0) return sys_read_stdin(buf, (uint32_t)count);
+    if (fd == 0) {
+        fd_table_t *fds = current_fds();
+        if (fds && fd_type(fds, 0) == FD_PIPE_READ) {
+            int pidx = fd_id(fds, 0);
+            int n;
+            while ((n = pipe_read(pidx, buf, (uint32_t)count)) == -2)
+                __asm__ volatile("int $0x20" ::: "memory");
+            return (n >= 0) ? (int64_t)n : -1;
+        }
+        return sys_read_stdin(buf, (uint32_t)count);
+    }
 
     fd_table_t *fds = current_fds();
     if (!fds) return -9;
@@ -190,6 +218,16 @@ static int64_t sys_close(uint64_t fd)
         fd_free(fds, (int)fd);
         return 0;
     }
+    if (type == FD_PIPE_READ) {
+        pipe_close_read(fd_id(fds, (int)fd));
+        fd_free(fds, (int)fd);
+        return 0;
+    }
+    if (type == FD_PIPE_WRITE) {
+        pipe_close_write(fd_id(fds, (int)fd));
+        fd_free(fds, (int)fd);
+        return 0;
+    }
 
     int vfd = fd_to_vfs(fds, (int)fd);
     if (vfd < 0) return -9;
@@ -205,6 +243,14 @@ static int64_t sys_exit(uint64_t status)
 
     /* Record exit status and wake any sys_waitpid callers. */
     if (proc) {
+        /* Close all pipe fds so connected readers/writers see EOF. */
+        for (int i = 0; i < MAX_FDS; i++) {
+            if (!proc->fds.fds[i].open) continue;
+            fd_type_t ft = proc->fds.fds[i].type;
+            if (ft == FD_PIPE_READ)  pipe_close_read(proc->fds.fds[i].id);
+            if (ft == FD_PIPE_WRITE) pipe_close_write(proc->fds.fds[i].id);
+            proc->fds.fds[i].open = false;
+        }
         proc->exit_status = (int32_t)(status & 0xffU);
         proc->exited = true;
         struct thread *w = proc->wait_queue;
@@ -253,7 +299,8 @@ static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
 #define MAX_SPAWN_ARGS 16
 #define MAX_ARG_LEN    256
 
-static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt)
+static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
+                         int64_t stdin_fd_parent, int64_t stdout_fd_parent)
 {
     if (path_virt >= 0x800000000000ULL) return -14;
     const char *path = (const char *)(uintptr_t)path_virt;
@@ -326,7 +373,42 @@ static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt)
 
     result.user_sp = sp;
     struct process *proc = process_create_from_result(&result);
-    return proc ? (int64_t)proc->pid : -1;
+    if (!proc) return -1;
+
+    /* Inherit pipe ends from parent into child at fd 0 (stdin) / fd 1 (stdout). */
+    fd_table_t *parent_fds = current_fds();
+    if (parent_fds) {
+        if (stdin_fd_parent >= 0) {
+            fd_type_t t = fd_type(parent_fds, (int)stdin_fd_parent);
+            if (t == FD_PIPE_READ)
+                fd_set(&proc->fds, 0, FD_PIPE_READ,
+                       fd_id(parent_fds, (int)stdin_fd_parent));
+        }
+        if (stdout_fd_parent >= 0) {
+            fd_type_t t = fd_type(parent_fds, (int)stdout_fd_parent);
+            if (t == FD_PIPE_WRITE)
+                fd_set(&proc->fds, 1, FD_PIPE_WRITE,
+                       fd_id(parent_fds, (int)stdout_fd_parent));
+        }
+    }
+    return (int64_t)proc->pid;
+}
+
+static int64_t sys_pipe(uint64_t pipefd_virt)
+{
+    if (pipefd_virt >= 0x800000000000ULL) return -14;
+    int32_t *pipefd = (int32_t *)(uintptr_t)pipefd_virt;
+    fd_table_t *fds = current_fds();
+    if (!fds) return -9;
+    int pidx = pipe_alloc();
+    if (pidx < 0) return -24;
+    int rfd = fd_alloc_pipe(fds, pidx, FD_PIPE_READ);
+    if (rfd < 0) { pipe_free(pidx); return -24; }
+    int wfd = fd_alloc_pipe(fds, pidx, FD_PIPE_WRITE);
+    if (wfd < 0) { fd_free(fds, rfd); pipe_free(pidx); return -24; }
+    pipefd[0] = rfd;
+    pipefd[1] = wfd;
+    return 0;
 }
 
 static int64_t sys_listdir(uint64_t path_virt, uint64_t buf_virt, uint64_t bufsz)
@@ -451,7 +533,8 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_GETGID:  { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.gid  : 0; }
     case SYS_GETEUID: { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.euid : 0; }
     case SYS_GETEGID: { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.egid : 0; }
-    case SYS_SPAWN:   return sys_spawn(a0, a1);
+    case SYS_PIPE:    return sys_pipe(a0);
+    case SYS_SPAWN:   return sys_spawn(a0, a1, (int64_t)a2, (int64_t)a3);
     case SYS_LISTDIR: return sys_listdir(a0, a1, a2);
     case SYS_CREAT:   return sys_creat(a0);
     case SYS_MKDIR:   return sys_mkdir(a0);

@@ -9,6 +9,7 @@ DEFAULT REL
 %define SYS_WRITE   1
 %define SYS_OPEN    2
 %define SYS_CLOSE   3
+%define SYS_PIPE    22
 %define SYS_EXIT    60
 %define SYS_WAITPID 61
 %define SYS_GETCWD  79
@@ -215,10 +216,222 @@ execute:
     test al, al
     jz .ex_done         ; empty line
     cmp al, ' '
-    jne .find_arg
+    jne .scan_for_pipe
     inc rbx
     jmp .skip_spaces
 
+    ; === PIPE SCAN: look for '|' before any arg processing ===
+.scan_for_pipe:
+    mov rcx, rbx
+.pipe_scan:
+    mov al, [rcx]
+    test al, al
+    jz .find_arg        ; no pipe found
+    cmp al, '|'
+    je .pipe_found
+    inc rcx
+    jmp .pipe_scan
+
+.pipe_found:
+    ; Trim spaces to the left of '|'
+    lea rdx, [rcx - 1]
+.pipe_trim_left:
+    cmp rdx, rbx
+    jbe .pipe_trim_done
+    cmp byte [rdx], ' '
+    jne .pipe_trim_done
+    dec rdx
+    jmp .pipe_trim_left
+.pipe_trim_done:
+    inc rdx
+    mov byte [rdx], 0           ; null-terminate left side
+
+    ; Skip spaces after '|' to find right side start
+    inc rcx
+.pipe_skip_right:
+    cmp byte [rcx], ' '
+    jne .pipe_right_ok
+    inc rcx
+    jmp .pipe_skip_right
+.pipe_right_ok:
+    ; Check both sides are non-empty
+    cmp byte [rbx], 0
+    je .pipe_bad
+    cmp byte [rcx], 0
+    je .pipe_bad
+
+    ; Save right side pointer
+    mov [pipe_right_ptr], rcx
+
+    ; sys_pipe(&pipe_fds)
+    mov rax, SYS_PIPE
+    lea rdi, [pipe_fds]
+    syscall
+    test rax, rax
+    js .pipe_bad
+
+    ; ---- Spawn LEFT command (stdout → pipe write end) ----
+    ; rbx = start of left command line (already NUL-terminated)
+    ; Parse cmd word
+    mov r12, rbx
+    mov r13, rbx
+.pleft_findend:
+    mov al, [r13]
+    test al, al
+    jz .pleft_noargs
+    cmp al, ' '
+    je .pleft_gotsp
+    inc r13
+    jmp .pleft_findend
+.pleft_gotsp:
+    mov byte [r13], 0
+    inc r13
+.pleft_skipsp:
+    cmp byte [r13], ' '
+    jne .pleft_haveargs
+    inc r13
+    jmp .pleft_skipsp
+.pleft_noargs:
+.pleft_haveargs:
+    ; Tokenize left args into spawn_argv[]
+    mov [spawn_argv], r12
+    xor r14, r14
+    mov rbx, r13
+.pleft_sp:
+    cmp byte [rbx], ' '
+    jne .pleft_tok
+    inc rbx
+    jmp .pleft_sp
+.pleft_tok:
+    cmp byte [rbx], 0
+    je .pleft_term
+    cmp r14, 8
+    jge .pleft_term
+    lea rcx, [spawn_argv + 8]
+    mov [rcx + r14*8], rbx
+    inc r14
+.pleft_tokend:
+    cmp byte [rbx], 0
+    je .pleft_term
+    cmp byte [rbx], ' '
+    je .pleft_nulltok
+    inc rbx
+    jmp .pleft_tokend
+.pleft_nulltok:
+    mov byte [rbx], 0
+    inc rbx
+    jmp .pleft_sp
+.pleft_term:
+    lea rcx, [spawn_argv + 8]
+    mov qword [rcx + r14*8], 0
+    ; sys_spawn(path, argv, stdin=-1, stdout=pipe_fds[1])
+    mov rax, SYS_SPAWN
+    mov rdi, r12
+    lea rsi, [spawn_argv]
+    mov rdx, -1                        ; stdin = default keyboard
+    movsx r10, dword [pipe_fds + 4]    ; stdout = pipe write end
+    syscall
+    mov [pipe_left_pid], rax
+
+    ; ---- Spawn RIGHT command (stdin → pipe read end) ----
+    mov rbx, [pipe_right_ptr]
+    mov r12, rbx
+    mov r13, rbx
+.pright_findend:
+    mov al, [r13]
+    test al, al
+    jz .pright_noargs
+    cmp al, ' '
+    je .pright_gotsp
+    inc r13
+    jmp .pright_findend
+.pright_gotsp:
+    mov byte [r13], 0
+    inc r13
+.pright_skipsp:
+    cmp byte [r13], ' '
+    jne .pright_haveargs
+    inc r13
+    jmp .pright_skipsp
+.pright_noargs:
+.pright_haveargs:
+    ; Tokenize right args into spawn_argv[]
+    mov [spawn_argv], r12
+    xor r14, r14
+    mov rbx, r13
+.pright_sp:
+    cmp byte [rbx], ' '
+    jne .pright_tok
+    inc rbx
+    jmp .pright_sp
+.pright_tok:
+    cmp byte [rbx], 0
+    je .pright_term
+    cmp r14, 8
+    jge .pright_term
+    lea rcx, [spawn_argv + 8]
+    mov [rcx + r14*8], rbx
+    inc r14
+.pright_tokend:
+    cmp byte [rbx], 0
+    je .pright_term
+    cmp byte [rbx], ' '
+    je .pright_nulltok
+    inc rbx
+    jmp .pright_tokend
+.pright_nulltok:
+    mov byte [rbx], 0
+    inc rbx
+    jmp .pright_sp
+.pright_term:
+    lea rcx, [spawn_argv + 8]
+    mov qword [rcx + r14*8], 0
+    ; sys_spawn(path, argv, stdin=pipe_fds[0], stdout=-1)
+    mov rax, SYS_SPAWN
+    mov rdi, r12
+    lea rsi, [spawn_argv]
+    movsx rdx, dword [pipe_fds]        ; stdin = pipe read end
+    mov r10, -1                        ; stdout = default serial
+    syscall
+    mov [pipe_right_pid], rax
+
+    ; Close parent's copies of the pipe fds
+    movsx rdi, dword [pipe_fds]        ; close read end
+    mov rax, SYS_CLOSE
+    syscall
+    movsx rdi, dword [pipe_fds + 4]    ; close write end
+    mov rax, SYS_CLOSE
+    syscall
+
+    ; Wait for right child (consumer)
+    mov rdi, [pipe_right_pid]
+    test rdi, rdi
+    js .pipe_wait_left
+    mov rax, SYS_WAITPID
+    xor rsi, rsi
+    xor rdx, rdx
+    syscall
+
+.pipe_wait_left:
+    ; Wait for left child (producer)
+    mov rdi, [pipe_left_pid]
+    test rdi, rdi
+    js .ex_done
+    mov rax, SYS_WAITPID
+    xor rsi, rsi
+    xor rdx, rdx
+    syscall
+    jmp .ex_done
+
+.pipe_bad:
+    mov rax, SYS_WRITE
+    mov rdi, 1
+    lea rsi, [err_pipe]
+    mov rdx, err_pipe_len
+    syscall
+    jmp .ex_done
+
+    ; === Normal (non-pipe) command parsing ===
 .find_arg:
     ; rbx = start of command word
     ; Find end of first word, note start of args
@@ -539,6 +752,8 @@ execute:
     mov rax, SYS_SPAWN
     mov rdi, r12
     lea rsi, [spawn_argv]
+    mov rdx, -1                    ; stdin = default
+    mov r10, -1                    ; stdout = default
     syscall
     cmp rax, 0
     jl .spawn_fail
@@ -593,6 +808,7 @@ help_text:      db "Built-in commands:", 10
                 db "  help          - show this help", 10
                 db "  exit          - quit shell", 10
                 db "External:  <path>  - run ELF from filesystem", 10
+                db "Pipes:     cmd1 | cmd2  - connect stdout to stdin", 10
 help_text_len   equ $ - help_text
 
 err_notfound:       db "command not found", 10
@@ -603,6 +819,9 @@ err_chdir_len   equ $ - err_chdir
 
 err_redir:      db "echo: cannot open output file", 10
 err_redir_len   equ $ - err_redir
+
+err_pipe:       db "pipe: failed", 10
+err_pipe_len    equ $ - err_pipe
 
 cmd_echo:   db "echo", 0
 cmd_cat:    db "cat", 0
@@ -618,11 +837,15 @@ root_path:  db "/", 0
 
 section .bss
 
-line_buf:   resb LINE_MAX
-ch_buf:     resb 1
-cat_buf:    resb CAT_BUF_SZ
-ls_buf:     resb LS_BUF_SZ
-cwd_buf:    resb CWD_BUF_SZ
-spawn_argv: resq 10
+line_buf:       resb LINE_MAX
+ch_buf:         resb 1
+cat_buf:        resb CAT_BUF_SZ
+ls_buf:         resb LS_BUF_SZ
+cwd_buf:        resb CWD_BUF_SZ
+spawn_argv:     resq 10
+pipe_fds:       resd 2          ; int[2]: [0]=read fd, [1]=write fd
+pipe_left_pid:  resq 1
+pipe_right_pid: resq 1
+pipe_right_ptr: resq 1
 
 section .note.GNU-stack noalloc noexec nowrite progbits

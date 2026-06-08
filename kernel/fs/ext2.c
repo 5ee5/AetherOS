@@ -652,6 +652,7 @@ int64_t ext2_read(ext2_fs_t *fs, uint32_t ino, uint64_t off, void *buf, uint32_t
     uint32_t remaining = size;
     uint64_t cur_off   = off;
 
+    uint32_t ptrs = fs->block_size / 4;
     while (remaining > 0) {
         uint32_t block_idx = (uint32_t)(cur_off / fs->block_size);
         uint32_t block_off = (uint32_t)(cur_off % fs->block_size);
@@ -659,15 +660,27 @@ int64_t ext2_read(ext2_fs_t *fs, uint32_t ino, uint64_t off, void *buf, uint32_t
         uint32_t block_no;
         if (block_idx < 12) {
             block_no = inode.i_block[block_idx];
-        } else if (block_idx < 12U + fs->block_size / 4U) {
+        } else if (block_idx < 12U + ptrs) {
             /* Singly indirect block. */
             uint32_t indir = inode.i_block[12];
             if (indir == 0) break;
             if (!read_block(fs, indir, fs->scratch)) return -1;
-            block_no = ((uint32_t *)fs->scratch)[block_idx - 12];
+            block_no = ((uint32_t *)fs->scratch)[block_idx - 12U];
+        } else if (block_idx < 12U + ptrs + ptrs * ptrs) {
+            /* Doubly-indirect block. */
+            uint32_t dbl_idx  = block_idx - 12U - ptrs;
+            uint32_t l1_idx   = dbl_idx / ptrs;
+            uint32_t l2_idx   = dbl_idx % ptrs;
+            uint32_t dbl_bno  = inode.i_block[13];
+            if (dbl_bno == 0) break;
+            if (!read_block(fs, dbl_bno, fs->scratch)) return -1;
+            uint32_t indir1 = ((uint32_t *)fs->scratch)[l1_idx];
+            if (indir1 == 0) break;
+            /* Reuse scratch — read the second-level indirect block */
+            if (!read_block(fs, indir1, fs->scratch)) return -1;
+            block_no = ((uint32_t *)fs->scratch)[l2_idx];
         } else {
-            /* Doubly/triply indirect: not supported for M4 (files < ~64 KiB). */
-            break;
+            break; /* triply-indirect not supported */
         }
 
         if (block_no == 0) break;
@@ -787,8 +800,54 @@ int64_t ext2_write(ext2_fs_t *fs, uint32_t ino, uint64_t off,
                 }
             }
             kfree(indir_buf);
+        } else if (block_idx < 12 + ptrs_per_block + ptrs_per_block * ptrs_per_block) {
+            /* Doubly-indirect block. */
+            uint32_t dbl_idx = block_idx - 12 - ptrs_per_block;
+            uint32_t l1_idx  = dbl_idx / ptrs_per_block;
+            uint32_t l2_idx  = dbl_idx % ptrs_per_block;
+            /* Allocate top-level doubly-indirect block if needed. */
+            if (inode.i_block[13] == 0) {
+                uint32_t dbl_bno = alloc_block(fs);
+                if (!dbl_bno) break;
+                memset(blkbuf, 0, fs->block_size);
+                if (!write_block(fs, dbl_bno, blkbuf)) break;
+                inode.i_block[13] = dbl_bno;
+            }
+            uint32_t *l1_buf = (uint32_t *)kmalloc(fs->block_size);
+            if (!l1_buf) break;
+            if (!read_block(fs, inode.i_block[13], (uint8_t *)l1_buf)) {
+                kfree(l1_buf); break;
+            }
+            /* Allocate second-level indirect block if needed. */
+            if (l1_buf[l1_idx] == 0) {
+                uint32_t l1_bno = alloc_block(fs);
+                if (!l1_bno) { kfree(l1_buf); break; }
+                memset(blkbuf, 0, fs->block_size);
+                if (!write_block(fs, l1_bno, blkbuf)) { kfree(l1_buf); break; }
+                l1_buf[l1_idx] = l1_bno;
+                if (!write_block(fs, inode.i_block[13], (uint8_t *)l1_buf)) {
+                    kfree(l1_buf); break;
+                }
+            }
+            uint32_t l1_bno = l1_buf[l1_idx];
+            kfree(l1_buf);
+            uint32_t *l2_buf = (uint32_t *)kmalloc(fs->block_size);
+            if (!l2_buf) break;
+            if (!read_block(fs, l1_bno, (uint8_t *)l2_buf)) {
+                kfree(l2_buf); break;
+            }
+            bno = l2_buf[l2_idx];
+            if (bno == 0) {
+                bno = alloc_block(fs);
+                if (!bno) { kfree(l2_buf); break; }
+                l2_buf[l2_idx] = bno;
+                if (!write_block(fs, l1_bno, (uint8_t *)l2_buf)) {
+                    kfree(l2_buf); break;
+                }
+            }
+            kfree(l2_buf);
         } else {
-            break; /* doubly-indirect not supported */
+            break; /* triply-indirect not supported */
         }
 
         if (block_off > 0 || to_write < fs->block_size) {
@@ -812,6 +871,7 @@ int64_t ext2_write(ext2_fs_t *fs, uint32_t ino, uint64_t off,
             for (int b = 0; b < 12; b++)
                 if (inode.i_block[b]) blks++;
             if (inode.i_block[12]) blks++;
+            if (inode.i_block[13]) blks++;
             inode.i_blocks = blks * (fs->block_size / 512);
         }
         write_inode(fs, ino, &inode);
