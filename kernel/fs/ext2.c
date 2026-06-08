@@ -753,13 +753,42 @@ int64_t ext2_write(ext2_fs_t *fs, uint32_t ino, uint64_t off,
         uint32_t to_write   = fs->block_size - block_off;
         if (to_write > size - written) to_write = size - written;
 
-        if (block_idx >= 12) break; /* only direct blocks */
+        uint32_t ptrs_per_block = fs->block_size / 4;
+        uint32_t bno;
 
-        uint32_t bno = inode.i_block[block_idx];
-        if (bno == 0) {
-            bno = alloc_block(fs);
-            if (!bno) break;
-            inode.i_block[block_idx] = bno;
+        if (block_idx < 12) {
+            bno = inode.i_block[block_idx];
+            if (bno == 0) {
+                bno = alloc_block(fs);
+                if (!bno) break;
+                inode.i_block[block_idx] = bno;
+            }
+        } else if (block_idx < 12 + ptrs_per_block) {
+            uint32_t indir_idx = block_idx - 12;
+            if (inode.i_block[12] == 0) {
+                uint32_t indir_bno = alloc_block(fs);
+                if (!indir_bno) break;
+                memset(blkbuf, 0, fs->block_size);
+                if (!write_block(fs, indir_bno, blkbuf)) break;
+                inode.i_block[12] = indir_bno;
+            }
+            uint32_t *indir_buf = (uint32_t *)kmalloc(fs->block_size);
+            if (!indir_buf) break;
+            if (!read_block(fs, inode.i_block[12], (uint8_t *)indir_buf)) {
+                kfree(indir_buf); break;
+            }
+            bno = indir_buf[indir_idx];
+            if (bno == 0) {
+                bno = alloc_block(fs);
+                if (!bno) { kfree(indir_buf); break; }
+                indir_buf[indir_idx] = bno;
+                if (!write_block(fs, inode.i_block[12], (uint8_t *)indir_buf)) {
+                    kfree(indir_buf); break;
+                }
+            }
+            kfree(indir_buf);
+        } else {
+            break; /* doubly-indirect not supported */
         }
 
         if (block_off > 0 || to_write < fs->block_size) {
@@ -782,6 +811,7 @@ int64_t ext2_write(ext2_fs_t *fs, uint32_t ino, uint64_t off,
             uint32_t blks = 0;
             for (int b = 0; b < 12; b++)
                 if (inode.i_block[b]) blks++;
+            if (inode.i_block[12]) blks++;
             inode.i_blocks = blks * (fs->block_size / 512);
         }
         write_inode(fs, ino, &inode);
@@ -800,6 +830,21 @@ bool ext2_truncate(ext2_fs_t *fs, uint32_t ino)
             free_block(fs, inode.i_block[b]);
             inode.i_block[b] = 0;
         }
+    }
+    if (inode.i_block[12]) {
+        uint8_t *indir = kmalloc(fs->block_size);
+        if (indir) {
+            if (read_block(fs, inode.i_block[12], indir)) {
+                uint32_t ptrs = fs->block_size / 4;
+                for (uint32_t i = 0; i < ptrs; i++) {
+                    uint32_t bno = ((uint32_t *)indir)[i];
+                    if (bno) free_block(fs, bno);
+                }
+            }
+            kfree(indir);
+        }
+        free_block(fs, inode.i_block[12]);
+        inode.i_block[12] = 0;
     }
     inode.i_size   = 0;
     inode.i_blocks = 0;
@@ -897,6 +942,21 @@ bool ext2_unlink(ext2_fs_t *fs, const char *path)
         /* Free data blocks. */
         for (int b = 0; b < 12; b++) {
             if (inode.i_block[b]) { free_block(fs, inode.i_block[b]); inode.i_block[b] = 0; }
+        }
+        if (inode.i_block[12]) {
+            uint8_t *indir = kmalloc(fs->block_size);
+            if (indir) {
+                if (read_block(fs, inode.i_block[12], indir)) {
+                    uint32_t ptrs = fs->block_size / 4;
+                    for (uint32_t i = 0; i < ptrs; i++) {
+                        uint32_t bno = ((uint32_t *)indir)[i];
+                        if (bno) free_block(fs, bno);
+                    }
+                }
+                kfree(indir);
+            }
+            free_block(fs, inode.i_block[12]);
+            inode.i_block[12] = 0;
         }
         inode.i_size   = 0;
         inode.i_blocks = 0;
