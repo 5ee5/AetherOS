@@ -286,6 +286,13 @@ static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
     if (!target) return -10;   /* ECHILD */
     struct thread *t = sched_current();
     while (!target->exited) {
+        /* Non-blocking serial peek: if user sends Ctrl+C, kill the process. */
+        char c = serial_read_char();
+        if (c == 0x03) {
+            process_kill(target);
+            serial_write("^C\n");
+            break;
+        }
         t->wait_next = target->wait_queue;
         target->wait_queue = t;
         t->state = THREAD_BLOCKED;

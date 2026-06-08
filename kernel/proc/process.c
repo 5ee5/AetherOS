@@ -7,6 +7,8 @@
 #include "exec/elf.h"
 #include "mem/heap.h"
 #include "proc/fd.h"
+#include "proc/pipe.h"
+#include "sched/sched.h"
 #include "sched/thread.h"
 #include "security/cred.h"
 
@@ -51,6 +53,32 @@ struct process *process_create_from_result(const elf_load_result_t *r)
     serial_write("\n");
 
     return proc;
+}
+
+void process_kill(struct process *proc)
+{
+    if (!proc || proc->exited) return;
+    /* Close all pipe fds so connected processes see EOF. */
+    for (int i = 0; i < MAX_FDS; i++) {
+        if (!proc->fds.fds[i].open) continue;
+        fd_type_t ft = proc->fds.fds[i].type;
+        if (ft == FD_PIPE_READ)  pipe_close_read(proc->fds.fds[i].id);
+        if (ft == FD_PIPE_WRITE) pipe_close_write(proc->fds.fds[i].id);
+        proc->fds.fds[i].open = false;
+    }
+    proc->exit_status = 130;   /* 128 + SIGINT */
+    proc->exited = true;
+    /* Wake any sys_waitpid callers. */
+    struct thread *w = proc->wait_queue;
+    proc->wait_queue = NULL;
+    while (w) {
+        struct thread *nxt = w->wait_next;
+        w->wait_next = NULL;
+        sched_wake(w);
+        w = nxt;
+    }
+    /* Mark the process thread as dead. */
+    if (proc->thread) proc->thread->state = THREAD_DEAD;
 }
 
 struct process *process_create_from_elf(const void *elf_data, uint64_t size)

@@ -43,7 +43,7 @@ debugfs -w "$IMG?offset=${EXT2_OFFSET}" -R "mkdir bin" 2>/dev/null
 if [ -f build/hello.elf ]; then
     debugfs -w "$IMG?offset=${EXT2_OFFSET}" -R "write build/hello.elf bin/hello" 2>/dev/null
 fi
-for prog in ls cat wc uname pwd mkdir rm cp wget grep; do
+for prog in ls cat wc uname pwd mkdir rm cp wget grep touch head tail sort find; do
     if [ -f "build/bin/${prog}.elf" ]; then
         debugfs -w "$IMG?offset=${EXT2_OFFSET}" \
             -R "write build/bin/${prog}.elf bin/${prog}" 2>/dev/null
