@@ -4,10 +4,12 @@
 #include <stdint.h>
 
 struct thread;
+struct process;
 
 void sched_init(void);
 void sched_add(struct thread *t);
-struct thread *sched_current(void);
+struct thread  *sched_current(void);
+struct process *sched_current_process(void);
 
 /* Wake a blocked thread: mark READY and re-enqueue. */
 void sched_wake(struct thread *t);

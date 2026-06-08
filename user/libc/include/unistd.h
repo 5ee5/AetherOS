@@ -14,4 +14,18 @@ pid_t    spawn(const char *path, char **argv);
 pid_t    waitpid(pid_t pid, int *status, int options);
 long     listdir(const char *path, char *buf, long bufsz);
 
+int      creat(const char *path);
+int      mkdir(const char *path, int mode);
+int      unlink(const char *path);
+int      chdir(const char *path);
+char    *getcwd(char *buf, long size);
+
+/* O_CREAT flag */
+#define O_RDONLY  0
+#define O_WRONLY  1
+#define O_RDWR    2
+#define O_CREAT   0x40
+#define O_TRUNC   0x200
+#define O_APPEND  0x400
+
 #endif

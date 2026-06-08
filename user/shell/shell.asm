@@ -11,12 +11,15 @@ DEFAULT REL
 %define SYS_CLOSE   3
 %define SYS_EXIT    60
 %define SYS_WAITPID 61
+%define SYS_GETCWD  79
+%define SYS_CHDIR   80
 %define SYS_SPAWN   500
 %define SYS_LISTDIR 600
 
 %define LINE_MAX    256
 %define CAT_BUF_SZ  4096
 %define LS_BUF_SZ   4096
+%define CWD_BUF_SZ  256
 
 section .text
 global _start
@@ -30,11 +33,19 @@ _start:
     syscall
 
 .prompt_loop:
-    ; Print "$ " prompt
+    ; Print cwd + " $ " prompt
+    mov rax, SYS_GETCWD
+    lea rdi, [cwd_buf]
+    mov rsi, CWD_BUF_SZ
+    syscall
+
+    lea rsi, [cwd_buf]
+    call writestr
+
     mov rax, SYS_WRITE
     mov rdi, 1
-    lea rsi, [prompt]
-    mov rdx, 2
+    lea rsi, [prompt_suffix]
+    mov rdx, prompt_suffix_len
     syscall
 
     ; Read a line into line_buf
@@ -159,13 +170,11 @@ streq:
     inc rcx
     jmp .lp
 .eq:
-    ; set ZF = 1
     xor eax, eax
     ret
 .ne:
-    ; clear ZF
     mov eax, 1
-    test eax, eax   ; clears ZF — actually 'test 1,1' is non-zero → ZF=0
+    test eax, eax
     ret
 
 ; ---- writestr ---------------------------------------------------------------
@@ -298,12 +307,17 @@ execute:
     lea rsi, [cmd_ls]
     mov rdi, r12
     call streq
-    jnz .try_clear
-    ; ls [path] — default to "/"
+    jnz .try_cd
+    ; ls [path] — default to cwd
     mov al, [r13]
     test al, al
     jnz .ls_with_path
-    lea r13, [root_path]
+    ; Use current working directory
+    mov rax, SYS_GETCWD
+    lea rdi, [cwd_buf]
+    mov rsi, CWD_BUF_SZ
+    syscall
+    lea r13, [cwd_buf]
 .ls_with_path:
     mov rax, SYS_LISTDIR
     mov rdi, r13
@@ -316,6 +330,47 @@ execute:
     mov rax, SYS_WRITE
     mov rdi, 1
     lea rsi, [ls_buf]
+    syscall
+    jmp .ex_done
+
+.try_cd:
+    lea rsi, [cmd_cd]
+    mov rdi, r12
+    call streq
+    jnz .try_pwd
+    ; cd [path] — default to /
+    mov al, [r13]
+    test al, al
+    jnz .cd_with_path
+    lea r13, [root_path]
+.cd_with_path:
+    mov rax, SYS_CHDIR
+    mov rdi, r13
+    syscall
+    test rax, rax
+    jz .ex_done
+    mov rax, SYS_WRITE
+    mov rdi, 1
+    lea rsi, [err_chdir]
+    mov rdx, err_chdir_len
+    syscall
+    jmp .ex_done
+
+.try_pwd:
+    lea rsi, [cmd_pwd]
+    mov rdi, r12
+    call streq
+    jnz .try_clear
+    mov rax, SYS_GETCWD
+    lea rdi, [cwd_buf]
+    mov rsi, CWD_BUF_SZ
+    syscall
+    lea rsi, [cwd_buf]
+    call writestr
+    mov rax, SYS_WRITE
+    mov rdi, 1
+    lea rsi, [nl]
+    mov rdx, 1
     syscall
     jmp .ex_done
 
@@ -404,10 +459,11 @@ execute:
 
 section .data
 
-banner:     db "AetherOS shell v0.7 — type 'help' for commands", 10
+banner:     db "AetherOS shell v0.8 — type 'help' for commands", 10
 banner_len  equ $ - banner
 
-prompt:     db "$ "
+prompt_suffix:      db " $ "
+prompt_suffix_len   equ $ - prompt_suffix
 
 nl:         db 10
 bs_seq:     db 8, ' ', 8       ; backspace erase sequence
@@ -415,13 +471,15 @@ bs_seq:     db 8, ' ', 8       ; backspace erase sequence
 clear_seq:      db 27, '[', '2', 'J', 27, '[', 'H'
 clear_seq_len   equ $ - clear_seq
 
-uname_str:      db "AetherOS 0.7 x86_64 (hobby kernel)", 10
+uname_str:      db "AetherOS 0.8 x86_64 (hobby kernel)", 10
 uname_str_len   equ $ - uname_str
 
 help_text:      db "Built-in commands:", 10
                 db "  echo [text]   - print text", 10
                 db "  cat <path>    - print file contents", 10
-                db "  ls [path]     - list directory (default /)", 10
+                db "  ls [path]     - list directory (default cwd)", 10
+                db "  cd [path]     - change directory (default /)", 10
+                db "  pwd           - print working directory", 10
                 db "  clear         - clear screen", 10
                 db "  uname         - print OS information", 10
                 db "  help          - show this help", 10
@@ -432,9 +490,14 @@ help_text_len   equ $ - help_text
 err_notfound:       db "command not found", 10
 err_notfound_len    equ $ - err_notfound
 
+err_chdir:      db "cd: no such directory", 10
+err_chdir_len   equ $ - err_chdir
+
 cmd_echo:   db "echo", 0
 cmd_cat:    db "cat", 0
 cmd_ls:     db "ls", 0
+cmd_cd:     db "cd", 0
+cmd_pwd:    db "pwd", 0
 cmd_clear:  db "clear", 0
 cmd_uname:  db "uname", 0
 cmd_help:   db "help", 0
@@ -448,6 +511,7 @@ line_buf:   resb LINE_MAX
 ch_buf:     resb 1
 cat_buf:    resb CAT_BUF_SZ
 ls_buf:     resb LS_BUF_SZ
+cwd_buf:    resb CWD_BUF_SZ
 spawn_argv: resq 3
 
 section .note.GNU-stack noalloc noexec nowrite progbits

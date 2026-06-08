@@ -35,6 +35,7 @@
 #define FIS_TYPE_H2D    0x27U
 
 #define ATA_CMD_READ_DMA_EXT  0x25U
+#define ATA_CMD_WRITE_DMA_EXT 0x35U
 
 #define MAX_PORTS 32
 
@@ -351,5 +352,61 @@ bool ahci_read_sectors(uint8_t port, uint64_t lba, uint16_t count, void *buf)
     }
 
     serial_write("ahci: read timeout\n");
+    return false;
+}
+
+bool ahci_write_sectors(uint8_t port, uint64_t lba, uint16_t count, const void *buf)
+{
+    if (!s_ports[port].present) return false;
+    if (count == 0 || count > 8) return false;
+
+    ahci_port_regs_t  *p  = &s_hba->ports[port];
+    ahci_cmd_header_t *cl = s_ports[port].cmd_list;
+    ahci_cmd_table_t  *ct = s_ports[port].cmd_table;
+
+    uint32_t tfd = p->tfd;
+    if (tfd & (AHCI_PxTFD_BSY | AHCI_PxTFD_DRQ)) return false;
+
+    uint64_t buf_virt  = (uint64_t)(uintptr_t)buf;
+    uint64_t buf_phys  = buf_virt - direct_base();
+    uint32_t byte_count = (uint32_t)count * 512;
+
+    ct->prdt[0].dba      = (uint32_t)(buf_phys & 0xffffffffU);
+    ct->prdt[0].dbau     = (uint32_t)(buf_phys >> 32);
+    ct->prdt[0].reserved = 0;
+    ct->prdt[0].dbc      = (byte_count - 1) & 0x3fffffU;
+
+    ahci_fis_h2d_t *fis = (ahci_fis_h2d_t *)ct->cfis;
+    memset(ct->cfis, 0, 64);
+    fis->fis_type  = FIS_TYPE_H2D;
+    fis->pm_port_c = 0x80U;
+    fis->command   = ATA_CMD_WRITE_DMA_EXT;
+    fis->device    = 0x40U;
+    fis->lba0      = (uint8_t)(lba);
+    fis->lba1      = (uint8_t)(lba >> 8);
+    fis->lba2      = (uint8_t)(lba >> 16);
+    fis->lba3      = (uint8_t)(lba >> 24);
+    fis->lba4      = (uint8_t)(lba >> 32);
+    fis->lba5      = (uint8_t)(lba >> 40);
+    fis->count_lo  = (uint8_t)(count);
+    fis->count_hi  = (uint8_t)(count >> 8);
+
+    cl[0].flags = (5U) | (1U << 6); /* CFL=5, write bit */
+    cl[0].prdtl = 1;
+    cl[0].prdbc = 0;
+
+    p->is = 0xffffffffU;
+    p->ci = 1U;
+
+    for (uint32_t i = 0; i < 1000000U; ++i) {
+        if (!(p->ci & 1U)) {
+            if (p->is & (1U << 30)) return false;
+            return true;
+        }
+        if (p->tfd & AHCI_PxTFD_ERR) return false;
+        for (volatile int j = 0; j < 10; ++j) {}
+    }
+
+    serial_write("ahci: write timeout\n");
     return false;
 }

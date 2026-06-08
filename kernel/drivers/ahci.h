@@ -13,6 +13,11 @@ bool ahci_init(void);
    Returns true on success. */
 bool ahci_read_sectors(uint8_t port, uint64_t lba, uint16_t count, void *buf);
 
+/* Write `count` 512-byte sectors to `port` starting at `lba` from `buf`.
+   `buf` must be physically contiguous (one PMM page, max 4 KiB = 8 sectors).
+   Returns true on success. */
+bool ahci_write_sectors(uint8_t port, uint64_t lba, uint16_t count, const void *buf);
+
 /* Return the port index of the first present disk, or -1 if none. */
 int ahci_first_disk(void);
 

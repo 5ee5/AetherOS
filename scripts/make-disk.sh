@@ -28,11 +28,11 @@ debugfs -w "$IMG?offset=${PART_OFFSET}" -R "mkdir bin" 2>/dev/null
 if [ -f build/hello.elf ]; then
     debugfs -w "$IMG?offset=${PART_OFFSET}" -R "write build/hello.elf bin/hello" 2>/dev/null
 fi
-for prog in ls cat wc uname; do
+for prog in ls cat wc uname pwd mkdir rm cp; do
     if [ -f "build/bin/${prog}.elf" ]; then
         debugfs -w "$IMG?offset=${PART_OFFSET}" \
             -R "write build/bin/${prog}.elf bin/${prog}" 2>/dev/null
     fi
 done
 
-echo "disk: created $IMG with /hello.txt and /bin/{hello,ls,cat,wc,uname}"
+echo "disk: created $IMG with /hello.txt and /bin/{hello,ls,cat,wc,uname,pwd,mkdir,rm,cp}"

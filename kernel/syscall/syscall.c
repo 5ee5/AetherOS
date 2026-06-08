@@ -67,24 +67,34 @@ void syscall_init(void)
 #define SYS_GETGID  104U
 #define SYS_GETEUID 107U
 #define SYS_GETEGID 108U
+#define SYS_STAT      4U
+#define SYS_GETCWD   79U
+#define SYS_CHDIR    80U
+#define SYS_MKDIR    83U
+#define SYS_UNLINK   87U
 #define SYS_SPAWN   500U
 #define SYS_LISTDIR 600U
+#define SYS_CREAT   601U
+
+static fd_table_t *current_fds(void);
 
 static int64_t sys_write(uint64_t fd, uint64_t buf_virt, uint64_t count)
 {
-    /* Only fd=1 (stdout) supported; write to serial. */
-    if (fd != 1U) {
-        return -9;   /* -EBADF */
-    }
-    /* Basic bounds check: user pointers must be below the kernel half. */
-    if (buf_virt + count < buf_virt || buf_virt + count > 0x800000000000ULL) {
-        return -14;  /* -EFAULT */
-    }
+    if (buf_virt + count < buf_virt || buf_virt + count > 0x800000000000ULL)
+        return -14; /* -EFAULT */
     const char *p = (const char *)(uintptr_t)buf_virt;
-    for (uint64_t i = 0; i < count; ++i) {
-        serial_write_char(p[i]);
+
+    if (fd == 1U || fd == 2U) {
+        for (uint64_t i = 0; i < count; ++i) serial_write_char(p[i]);
+        return (int64_t)count;
     }
-    return (int64_t)count;
+
+    /* Route to VFS for file fds. */
+    fd_table_t *fds = current_fds();
+    if (!fds) return -9; /* EBADF */
+    int vfd = fd_to_vfs(fds, (int)fd);
+    if (vfd < 0) return -9;
+    return vfs_write(vfd, p, (uint32_t)count);
 }
 
 static fd_table_t *current_fds(void)
@@ -97,10 +107,10 @@ static fd_table_t *current_fds(void)
 
 static int64_t sys_open(uint64_t path_virt, uint64_t flags, uint64_t mode)
 {
-    (void)flags; (void)mode;
+    (void)mode;
     if (path_virt >= 0x800000000000ULL) return -14; /* EFAULT */
     const char *path = (const char *)(uintptr_t)path_virt;
-    int vfd = vfs_open(path);
+    int vfd = vfs_open_ex(path, (int)flags);
     if (vfd < 0) return -2; /* ENOENT */
     fd_table_t *fds = current_fds();
     if (!fds) { vfs_close(vfd); return -9; }
@@ -292,6 +302,38 @@ static int64_t sys_listdir(uint64_t path_virt, uint64_t buf_virt, uint64_t bufsz
                                  (char *)(uintptr_t)buf_virt, (uint32_t)bufsz);
 }
 
+static int64_t sys_creat(uint64_t path_virt)
+{
+    if (path_virt >= 0x800000000000ULL) return -14;
+    return vfs_creat((const char *)(uintptr_t)path_virt);
+}
+
+static int64_t sys_mkdir(uint64_t path_virt)
+{
+    if (path_virt >= 0x800000000000ULL) return -14;
+    return vfs_mkdir((const char *)(uintptr_t)path_virt);
+}
+
+static int64_t sys_unlink(uint64_t path_virt)
+{
+    if (path_virt >= 0x800000000000ULL) return -14;
+    return vfs_unlink((const char *)(uintptr_t)path_virt);
+}
+
+static int64_t sys_chdir(uint64_t path_virt)
+{
+    if (path_virt >= 0x800000000000ULL) return -14;
+    return vfs_chdir((const char *)(uintptr_t)path_virt);
+}
+
+static int64_t sys_getcwd(uint64_t buf_virt, uint64_t size)
+{
+    if (buf_virt >= 0x800000000000ULL) return -14;
+    if (vfs_getcwd((char *)(uintptr_t)buf_virt, (uint32_t)size) == 0)
+        return (int64_t)strlen((char *)(uintptr_t)buf_virt);
+    return -1;
+}
+
 int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
                          uint64_t a3, uint64_t a4)
 {
@@ -310,6 +352,11 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_GETEGID: { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.egid : 0; }
     case SYS_SPAWN:   return sys_spawn(a0, a1);
     case SYS_LISTDIR: return sys_listdir(a0, a1, a2);
+    case SYS_CREAT:   return sys_creat(a0);
+    case SYS_MKDIR:   return sys_mkdir(a0);
+    case SYS_UNLINK:  return sys_unlink(a0);
+    case SYS_CHDIR:   return sys_chdir(a0);
+    case SYS_GETCWD:  return sys_getcwd(a0, a1);
     default:
         serial_write("syscall: unknown nr=");
         serial_write_dec(nr);

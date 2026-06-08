@@ -8,7 +8,10 @@
 #include "core/serial.h"
 #include "drivers/ahci.h"
 #include "fs/ext2.h"
+#include "lib/string.h"
 #include "mem/heap.h"
+#include "proc/process.h"
+#include "sched/sched.h"
 
 /* ---- AHCI-backed block device -------------------------------------------- */
 
@@ -19,11 +22,24 @@ typedef struct {
 static bool ahci_blkdev_read(blkdev_t *self, uint64_t lba, uint32_t count, void *buf)
 {
     ahci_blkdev_priv_t *priv = (ahci_blkdev_priv_t *)self->priv;
-    /* ahci_read_sectors handles at most 8 sectors per call. */
     uint8_t *p = (uint8_t *)buf;
     while (count > 0) {
         uint16_t batch = (count > 8) ? 8 : (uint16_t)count;
         if (!ahci_read_sectors(priv->port, lba, batch, p)) return false;
+        p     += (uint64_t)batch * 512;
+        lba   += batch;
+        count -= batch;
+    }
+    return true;
+}
+
+static bool ahci_blkdev_write(blkdev_t *self, uint64_t lba, uint32_t count, const void *buf)
+{
+    ahci_blkdev_priv_t *priv = (ahci_blkdev_priv_t *)self->priv;
+    const uint8_t *p = (const uint8_t *)buf;
+    while (count > 0) {
+        uint16_t batch = (count > 8) ? 8 : (uint16_t)count;
+        if (!ahci_write_sectors(priv->port, lba, batch, p)) return false;
         p     += (uint64_t)batch * 512;
         lba   += batch;
         count -= batch;
@@ -59,11 +75,12 @@ bool vfs_init(void)
         return false;
     }
 
-    s_blkpriv.port     = (uint8_t)disk;
+    s_blkpriv.port        = (uint8_t)disk;
     s_blkdev.sector_size  = 512;
-    s_blkdev.sector_count = 0; /* not needed for our use */
-    s_blkdev.read      = ahci_blkdev_read;
-    s_blkdev.priv      = &s_blkpriv;
+    s_blkdev.sector_count = 0;
+    s_blkdev.read         = ahci_blkdev_read;
+    s_blkdev.write        = ahci_blkdev_write;
+    s_blkdev.priv         = &s_blkpriv;
 
     /* Find first GPT partition. */
     gpt_partition_t parts[4];
@@ -130,4 +147,97 @@ uint32_t vfs_listdir(const char *path, char *buf, uint32_t bufsz)
     uint32_t ino;
     if (!ext2_lookup(s_root_fs, path, &ino)) return 0;
     return ext2_list_dir(s_root_fs, ino, buf, bufsz);
+}
+
+int64_t vfs_write(int fd, const void *buf, uint32_t size)
+{
+    if (fd < 0 || fd >= VFS_MAX_OPEN || !s_files[fd].in_use) return -1;
+    vfs_file_t *f = &s_files[fd];
+    int64_t n = ext2_write(s_root_fs, f->inode, f->offset, buf, size);
+    if (n > 0) f->offset += (uint64_t)n;
+    return n;
+}
+
+int vfs_open_ex(const char *path, int flags)
+{
+    if (!s_root_fs) return -1;
+
+    uint32_t ino = 0;
+    bool found = ext2_lookup(s_root_fs, path, &ino);
+
+    if (!found) {
+        if (!(flags & 0x40)) return -1; /* O_CREAT not set */
+        ino = ext2_create(s_root_fs, path);
+        if (!ino) return -1;
+    } else if (flags & 0x200) { /* O_TRUNC */
+        ext2_truncate(s_root_fs, ino);
+    }
+
+    for (int i = 0; i < VFS_MAX_OPEN; ++i) {
+        if (!s_files[i].in_use) {
+            s_files[i].in_use = true;
+            s_files[i].inode  = ino;
+            s_files[i].offset = (flags & 0x400) ? ext2_file_size(s_root_fs, ino) : 0;
+            return i;
+        }
+    }
+    return -1;
+}
+
+int vfs_creat(const char *path)
+{
+    if (!s_root_fs) return -1;
+    return ext2_create(s_root_fs, path) ? 0 : -1;
+}
+
+int vfs_mkdir(const char *path)
+{
+    if (!s_root_fs) return -1;
+    return ext2_mkdir(s_root_fs, path) ? 0 : -1;
+}
+
+int vfs_unlink(const char *path)
+{
+    if (!s_root_fs) return -1;
+    return ext2_unlink(s_root_fs, path) ? 0 : -1;
+}
+
+/* ---- Working directory ---------------------------------------------------- */
+
+static char s_kernel_cwd[256] = "/";
+
+int vfs_chdir(const char *path)
+{
+    if (!s_root_fs || !path) return -1;
+    /* Verify the path exists and is a directory. */
+    uint32_t ino = 0;
+    if (!ext2_lookup(s_root_fs, path, &ino)) return -1;
+
+    struct process *proc = sched_current_process();
+    char *cwd = proc ? proc->cwd : s_kernel_cwd;
+
+    /* Normalise: handle relative paths (currently the VFS only handles absolute). */
+    if (path[0] == '/') {
+        strncpy(cwd, path, 255);
+        cwd[255] = '\0';
+    } else {
+        /* Append to current cwd. */
+        uint32_t base_len = strlen(cwd);
+        if (base_len > 0 && cwd[base_len - 1] != '/') {
+            if (base_len < 254) { cwd[base_len] = '/'; cwd[base_len + 1] = '\0'; base_len++; }
+        }
+        strncat(cwd, path, 255 - base_len);
+        cwd[255] = '\0';
+    }
+    return 0;
+}
+
+int vfs_getcwd(char *buf, uint32_t size)
+{
+    if (!buf || size == 0) return -1;
+    struct process *proc = sched_current_process();
+    const char *cwd = proc ? proc->cwd : s_kernel_cwd;
+    strncpy(buf, cwd, size - 1);
+    buf[size - 1] = '\0';
+    return 0;
 }

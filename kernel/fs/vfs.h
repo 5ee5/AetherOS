@@ -23,4 +23,25 @@ uint64_t vfs_file_size(const char *path);
    Returns bytes written (not including NUL), 0 on error. */
 uint32_t vfs_listdir(const char *path, char *buf, uint32_t bufsz);
 
+/* Write up to `size` bytes from `buf` to open fd.  Returns bytes written or <0. */
+int64_t vfs_write(int fd, const void *buf, uint32_t size);
+
+/* Open (or create if O_CREAT) a file.  flags: 0=read, 1=write, 0x40=O_CREAT. */
+int vfs_open_ex(const char *path, int flags);
+
+/* Create a regular file at `path`.  Returns 0 on success or -1 on error. */
+int vfs_creat(const char *path);
+
+/* Create a directory at `path`.  Returns 0 on success or -1 on error. */
+int vfs_mkdir(const char *path);
+
+/* Remove the file at `path`.  Returns 0 on success or -1 on error. */
+int vfs_unlink(const char *path);
+
+/* Change working directory for the current process. */
+int vfs_chdir(const char *path);
+
+/* Get working directory for the current process into `buf`. */
+int vfs_getcwd(char *buf, uint32_t size);
+
 #endif

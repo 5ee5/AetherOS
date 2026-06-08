@@ -33,4 +33,22 @@ uint32_t ext2_list_dir(ext2_fs_t *fs, uint32_t dir_ino, char *buf, uint32_t bufs
    (Wraps ext2_lookup for callers that need the inode.) */
 uint32_t ext2_lookup_ino(ext2_fs_t *fs, const char *path);
 
+/* Write up to `size` bytes to inode `ino` starting at byte offset `off`.
+   Allocates data blocks as needed.  Returns bytes written or <0 on error. */
+int64_t ext2_write(ext2_fs_t *fs, uint32_t ino, uint64_t off,
+                   const void *buf, uint32_t size);
+
+/* Create a regular file at `path`.  Returns inode number or 0 on error. */
+uint32_t ext2_create(ext2_fs_t *fs, const char *path);
+
+/* Create a directory at `path`.  Returns inode number or 0 on error. */
+uint32_t ext2_mkdir(ext2_fs_t *fs, const char *path);
+
+/* Remove the file at `path` (decrements link count; frees on last link).
+   Returns true on success. */
+bool ext2_unlink(ext2_fs_t *fs, const char *path);
+
+/* Truncate inode `ino` to zero length (frees all data blocks). */
+bool ext2_truncate(ext2_fs_t *fs, uint32_t ino);
+
 #endif

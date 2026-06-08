@@ -62,3 +62,26 @@ size_t strlen(const char *text)
 	return len;
 }
 
+int strcmp(const char *a, const char *b)
+{
+	while (*a && *a == *b) { a++; b++; }
+	return (unsigned char)*a - (unsigned char)*b;
+}
+
+char *strncpy(char *dst, const char *src, size_t n)
+{
+	size_t i = 0;
+	for (; i < n && src[i]; i++) dst[i] = src[i];
+	for (; i < n; i++) dst[i] = '\0';
+	return dst;
+}
+
+char *strncat(char *dst, const char *src, size_t n)
+{
+	char *end = dst + strlen(dst);
+	size_t i = 0;
+	for (; i < n && src[i]; i++) end[i] = src[i];
+	end[i] = '\0';
+	return dst;
+}
+

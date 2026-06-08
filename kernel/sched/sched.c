@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "arch/x86_64/apic.h"
+#include "proc/process.h"
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/tss.h"
@@ -95,6 +96,13 @@ void sched_add(struct thread *t)
 struct thread *sched_current(void)
 {
 	return cpu_current[lapic_id()];
+}
+
+struct process *sched_current_process(void)
+{
+	struct thread *t = sched_current();
+	if (!t) return NULL;
+	return (struct process *)t->process;
 }
 
 void sched_wake(struct thread *t)

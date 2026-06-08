@@ -80,3 +80,30 @@ long listdir(const char *path, char *buf, long bufsz)
 {
     return __sc3(600, (long)path, (long)buf, bufsz);
 }
+
+int creat(const char *path)
+{
+    return (int)__sc1(601, (long)path);
+}
+
+int mkdir(const char *path, int mode)
+{
+    (void)mode;
+    return (int)__sc1(83, (long)path);
+}
+
+int unlink(const char *path)
+{
+    return (int)__sc1(87, (long)path);
+}
+
+int chdir(const char *path)
+{
+    return (int)__sc1(80, (long)path);
+}
+
+char *getcwd(char *buf, long size)
+{
+    long r = __sc2(79, (long)buf, size);
+    return (r >= 0) ? buf : (char *)0;
+}

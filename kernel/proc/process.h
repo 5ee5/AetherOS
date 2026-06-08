@@ -19,6 +19,7 @@ struct process {
     volatile bool    exited;
     volatile int32_t exit_status;
     struct thread   *wait_queue;  /* threads blocked in sys_waitpid */
+    char             cwd[256];
 };
 
 /* Create a process from an already-loaded ELF result (entry/user_sp/cr3). */

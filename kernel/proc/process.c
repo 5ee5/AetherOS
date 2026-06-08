@@ -34,6 +34,7 @@ struct process *process_create_from_result(const elf_load_result_t *r)
     proc->exited      = false;
     proc->exit_status = 0;
     proc->wait_queue  = NULL;
+    proc->cwd[0] = '/'; proc->cwd[1] = '\0';
     fd_table_init(&proc->fds);
     cred_init(&proc->cred, 1000, 1000);
     proc->thread = thread_create_user(r->entry, r->user_sp, r->cr3);
