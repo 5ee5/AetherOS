@@ -88,6 +88,7 @@ void syscall_init(void)
 #define SYS_SETGID   106U
 #define SYS_SLEEP     35U
 #define SYS_KILL      62U
+#define SYS_CHMOD     90U
 #define SYS_SPAWN    500U
 #define SYS_SPAWN_AS 501U
 #define SYS_LISTDIR  600U
@@ -151,6 +152,25 @@ static int64_t sys_open(uint64_t path_virt, uint64_t flags, uint64_t mode)
     (void)mode;
     if (path_virt >= 0x800000000000ULL) return -14; /* EFAULT */
     const char *path = (const char *)(uintptr_t)path_virt;
+
+    /* Check read/write permission on existing files. */
+    {
+        struct process *cp = sched_current_process();
+        if (cp) {
+            uint16_t fmode = 0; uint32_t fuid = 0, fgid = 0;
+            if (vfs_file_stat(path, &fmode, &fuid, &fgid) == 0) {
+                uint8_t access;
+                uint32_t rw = flags & 3u;
+                if      (rw == 1u) access = 2u;  /* O_WRONLY → write */
+                else if (rw == 2u) access = 6u;  /* O_RDWR  → read+write */
+                else               access = 4u;  /* O_RDONLY → read */
+                if (!cred_check(&cp->cred, fuid, fgid, fmode, access))
+                    return -13; /* EACCES */
+            }
+            /* If stat fails the file doesn't exist; O_CREAT will handle it. */
+        }
+    }
+
     int vfd = vfs_open_ex(path, (int)flags);
     if (vfd < 0) return -2; /* ENOENT */
     fd_table_t *fds = current_fds();
@@ -321,6 +341,17 @@ static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
     if (path_virt >= 0x800000000000ULL) return -14;
     const char *path = (const char *)(uintptr_t)path_virt;
 
+    /* Check execute permission before loading. */
+    {
+        struct process *cp = sched_current_process();
+        if (cp) {
+            uint16_t fmode = 0; uint32_t fuid = 0, fgid = 0;
+            if (vfs_file_stat(path, &fmode, &fuid, &fgid) == 0 &&
+                !cred_check(&cp->cred, fuid, fgid, fmode, 1u))
+                return -13; /* EACCES */
+        }
+    }
+
     uint64_t fsize = vfs_file_size(path);
     if (fsize == UINT64_MAX || fsize == 0 || fsize > 4U * 1024U * 1024U) return -2;
     void *buf = kmalloc((uint32_t)fsize);
@@ -410,8 +441,8 @@ static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
 
     /* Setuid: if the executable's inode has the setuid bit (04000), elevate euid. */
     {
-        uint16_t fmode = 0; uint32_t fuid = 0;
-        if (vfs_file_stat(path, &fmode, &fuid) == 0 && (fmode & 04000U)) {
+        uint16_t fmode = 0; uint32_t fuid = 0, fgid = 0;
+        if (vfs_file_stat(path, &fmode, &fuid, &fgid) == 0 && (fmode & 04000U)) {
             proc->cred.euid = fuid;
             if (fuid == 0) proc->cred.egid = 0;
         }
@@ -642,6 +673,15 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_SEND:    return sys_send(a0, a1, a2, a3);
     case SYS_RECV:    return sys_recv(a0, a1, a2, a3);
     case SYS_DNS:     return sys_dns(a0, a1);
+    case SYS_CHMOD: {
+        if (a0 >= 0x800000000000ULL) return -14;
+        struct process *p = sched_current_process();
+        if (!p) return -1;
+        uint16_t fmode = 0; uint32_t fuid = 0, fgid = 0;
+        if (vfs_file_stat((const char *)(uintptr_t)a0, &fmode, &fuid, &fgid) < 0) return -2;
+        if (p->cred.euid != 0 && p->cred.euid != fuid) return -1; /* EPERM */
+        return vfs_chmod((const char *)(uintptr_t)a0, (uint16_t)(a1 & 0xfffU));
+    }
     case SYS_SLEEP:   sched_sleep_ms(a0); return 0;
     case SYS_KILL: {
         struct process *caller = sched_current_process();

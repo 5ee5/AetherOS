@@ -161,6 +161,11 @@ int dns_resolve(const char *hostname, uint32_t *ip_out)
     return (int)__sc2(602, (long)hostname, (long)ip_out);
 }
 
+int chmod(const char *path, int mode)
+{
+    return (int)__sc2(90, (long)path, (long)mode);
+}
+
 int reboot(int cmd)
 {
     return (int)__sc1(169, (long)cmd);

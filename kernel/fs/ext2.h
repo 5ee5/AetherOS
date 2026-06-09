@@ -38,11 +38,11 @@ uint32_t ext2_lookup_ino(ext2_fs_t *fs, const char *path);
 int64_t ext2_write(ext2_fs_t *fs, uint32_t ino, uint64_t off,
                    const void *buf, uint32_t size);
 
-/* Create a regular file at `path`.  Returns inode number or 0 on error. */
-uint32_t ext2_create(ext2_fs_t *fs, const char *path);
+/* Create a regular file at `path` owned by uid/gid.  Returns inode number or 0 on error. */
+uint32_t ext2_create(ext2_fs_t *fs, const char *path, uint32_t uid, uint32_t gid);
 
-/* Create a directory at `path`.  Returns inode number or 0 on error. */
-uint32_t ext2_mkdir(ext2_fs_t *fs, const char *path);
+/* Create a directory at `path` owned by uid/gid.  Returns inode number or 0 on error. */
+uint32_t ext2_mkdir(ext2_fs_t *fs, const char *path, uint32_t uid, uint32_t gid);
 
 /* Remove the file at `path` (decrements link count; frees on last link).
    Returns true on success. */
@@ -51,10 +51,14 @@ bool ext2_unlink(ext2_fs_t *fs, const char *path);
 /* Truncate inode `ino` to zero length (frees all data blocks). */
 bool ext2_truncate(ext2_fs_t *fs, uint32_t ino);
 
-/* Read i_mode and i_uid from inode `ino`. Returns true on success. */
-bool ext2_inode_stat(ext2_fs_t *fs, uint32_t ino, uint16_t *out_mode, uint32_t *out_uid);
+/* Read i_mode, i_uid, and i_gid from inode `ino`. Returns true on success. */
+bool ext2_inode_stat(ext2_fs_t *fs, uint32_t ino, uint16_t *out_mode,
+                     uint32_t *out_uid, uint32_t *out_gid);
 
 /* Set i_uid and i_gid on inode `ino`. Returns true on success. */
 bool ext2_inode_chown(ext2_fs_t *fs, uint32_t ino, uint32_t uid, uint32_t gid);
+
+/* Change permission bits on the file at `path`. Returns 0 on success, -1 on error. */
+int ext2_chmod(ext2_fs_t *fs, const char *path, uint16_t mode);
 
 #endif

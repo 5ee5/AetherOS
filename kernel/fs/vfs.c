@@ -204,7 +204,10 @@ int vfs_open_ex(const char *path, int flags)
 
     if (!found) {
         if (!(flags & 0x40)) return -1; /* O_CREAT not set */
-        ino = ext2_create(s_root_fs, path);
+        struct process *cp = sched_current_process();
+        uint32_t cuid = cp ? cp->cred.euid : 0;
+        uint32_t cgid = cp ? cp->cred.egid : 0;
+        ino = ext2_create(s_root_fs, path, cuid, cgid);
         if (!ino) return -1;
     } else if (flags & 0x200) { /* O_TRUNC */
         ext2_truncate(s_root_fs, ino);
@@ -224,13 +227,19 @@ int vfs_open_ex(const char *path, int flags)
 int vfs_creat(const char *path)
 {
     if (!s_root_fs) return -1;
-    return ext2_create(s_root_fs, path) ? 0 : -1;
+    struct process *p = sched_current_process();
+    uint32_t uid = p ? p->cred.euid : 0;
+    uint32_t gid = p ? p->cred.egid : 0;
+    return ext2_create(s_root_fs, path, uid, gid) ? 0 : -1;
 }
 
 int vfs_mkdir(const char *path)
 {
     if (!s_root_fs) return -1;
-    return ext2_mkdir(s_root_fs, path) ? 0 : -1;
+    struct process *p = sched_current_process();
+    uint32_t uid = p ? p->cred.euid : 0;
+    uint32_t gid = p ? p->cred.egid : 0;
+    return ext2_mkdir(s_root_fs, path, uid, gid) ? 0 : -1;
 }
 
 int vfs_unlink(const char *path)
@@ -279,12 +288,12 @@ int vfs_getcwd(char *buf, uint32_t size)
     return 0;
 }
 
-int vfs_file_stat(const char *path, uint16_t *out_mode, uint32_t *out_uid)
+int vfs_file_stat(const char *path, uint16_t *out_mode, uint32_t *out_uid, uint32_t *out_gid)
 {
     if (!s_root_fs) return -1;
     uint32_t ino;
     if (!ext2_lookup(s_root_fs, path, &ino)) return -1;
-    return ext2_inode_stat(s_root_fs, ino, out_mode, out_uid) ? 0 : -1;
+    return ext2_inode_stat(s_root_fs, ino, out_mode, out_uid, out_gid) ? 0 : -1;
 }
 
 int vfs_chown(const char *path, uint32_t uid, uint32_t gid)
@@ -293,4 +302,10 @@ int vfs_chown(const char *path, uint32_t uid, uint32_t gid)
     uint32_t ino;
     if (!ext2_lookup(s_root_fs, path, &ino)) return -1;
     return ext2_inode_chown(s_root_fs, ino, uid, gid) ? 0 : -1;
+}
+
+int vfs_chmod(const char *path, uint16_t mode)
+{
+    if (!s_root_fs) return -1;
+    return ext2_chmod(s_root_fs, path, mode);
 }

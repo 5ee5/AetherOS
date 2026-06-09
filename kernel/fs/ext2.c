@@ -914,7 +914,7 @@ bool ext2_truncate(ext2_fs_t *fs, uint32_t ino)
     return write_inode(fs, ino, &inode);
 }
 
-uint32_t ext2_create(ext2_fs_t *fs, const char *path)
+uint32_t ext2_create(ext2_fs_t *fs, const char *path, uint32_t uid, uint32_t gid)
 {
     if (!fs || !path) return 0;
     char parent[256], name[256];
@@ -931,9 +931,11 @@ uint32_t ext2_create(ext2_fs_t *fs, const char *path)
 
     ext2_inode_t inode;
     memset(&inode, 0, sizeof(inode));
-    inode.i_mode   = EXT2_IMODE_REG | 0644U;
+    inode.i_mode        = EXT2_IMODE_REG | 0644U;
+    inode.i_uid         = (uint16_t)uid;
+    inode.i_gid         = (uint16_t)gid;
     inode.i_links_count = 1;
-    inode.i_size   = 0;
+    inode.i_size        = 0;
     if (!write_inode(fs, ino, &inode)) { free_inode(fs, ino); return 0; }
 
     if (!dir_add_entry(fs, parent_ino, name, ino, 1 /* EXT2_FT_REG_FILE */)) {
@@ -943,7 +945,7 @@ uint32_t ext2_create(ext2_fs_t *fs, const char *path)
     return ino;
 }
 
-uint32_t ext2_mkdir(ext2_fs_t *fs, const char *path)
+uint32_t ext2_mkdir(ext2_fs_t *fs, const char *path, uint32_t uid, uint32_t gid)
 {
     if (!fs || !path) return 0;
     char parent[256], name[256];
@@ -959,7 +961,9 @@ uint32_t ext2_mkdir(ext2_fs_t *fs, const char *path)
 
     ext2_inode_t inode;
     memset(&inode, 0, sizeof(inode));
-    inode.i_mode   = EXT2_IMODE_DIR | 0755U;
+    inode.i_mode        = EXT2_IMODE_DIR | 0755U;
+    inode.i_uid         = (uint16_t)uid;
+    inode.i_gid         = (uint16_t)gid;
     inode.i_links_count = 2; /* . and parent */
     if (!write_inode(fs, ino, &inode)) { free_inode(fs, ino); return 0; }
 
@@ -1032,13 +1036,26 @@ bool ext2_unlink(ext2_fs_t *fs, const char *path)
     return dir_remove_entry(fs, parent_ino, name);
 }
 
-bool ext2_inode_stat(ext2_fs_t *fs, uint32_t ino, uint16_t *out_mode, uint32_t *out_uid)
+bool ext2_inode_stat(ext2_fs_t *fs, uint32_t ino, uint16_t *out_mode,
+                     uint32_t *out_uid, uint32_t *out_gid)
 {
     ext2_inode_t inode;
     if (!read_inode(fs, ino, &inode)) return false;
     if (out_mode) *out_mode = inode.i_mode;
     if (out_uid)  *out_uid  = inode.i_uid;
+    if (out_gid)  *out_gid  = inode.i_gid;
     return true;
+}
+
+int ext2_chmod(ext2_fs_t *fs, const char *path, uint16_t mode)
+{
+    if (!fs || !path) return -1;
+    uint32_t ino = ext2_lookup_ino(fs, path);
+    if (!ino) return -1;
+    ext2_inode_t inode;
+    if (!read_inode(fs, ino, &inode)) return -1;
+    inode.i_mode = (uint16_t)((inode.i_mode & 0xf000U) | (mode & 0xfffU));
+    return write_inode(fs, ino, &inode) ? 0 : -1;
 }
 
 bool ext2_inode_chown(ext2_fs_t *fs, uint32_t ino, uint32_t uid, uint32_t gid)
