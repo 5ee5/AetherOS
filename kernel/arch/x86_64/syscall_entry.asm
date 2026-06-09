@@ -26,9 +26,13 @@ syscall_entry:
     ; Swap GS: kernel GS base now visible (cpu_local_data[cpu])
     swapgs
 
-    ; Save user RSP and load kernel RSP from cpu_local (offsets 8 and 0)
-    mov  [gs:8], rsp         ; cpu_local.user_rsp = user RSP
+    ; Save user RSP and load kernel RSP from cpu_local (offsets 8 and 0).
+    ; Then immediately push user RSP onto the kernel stack so it is
+    ; thread-local — cpu_local.user_rsp is per-CPU and would be clobbered
+    ; if the scheduler preempts us and another thread makes a syscall.
+    mov  [gs:8], rsp         ; cpu_local.user_rsp = user RSP (temp)
     mov  rsp, [gs:0]         ; rsp = cpu_local.kernel_rsp
+    push QWORD [gs:8]        ; push user RSP onto kernel stack (thread-local)
     swapgs                   ; restore user GS (kernel doesn't need it)
 
     ; Now on the kernel stack. Save all caller-save + syscall-clobbered regs.
@@ -76,10 +80,10 @@ syscall_entry:
     pop  r11                 ; RFLAGS for sysretq
     pop  rcx                 ; RIP for sysretq
 
-    ; Restore user RSP
-    swapgs
-    mov  rsp, [gs:8]         ; rsp = saved user RSP
-    swapgs
+    ; Restore user RSP from the kernel stack (thread-local, not cpu_local).
+    ; No swapgs needed — GS is already user GS (set by the second swapgs in
+    ; the prologue and never changed again during dispatch).
+    pop  rsp                 ; rsp = saved user RSP
 
     o64 sysret
 
