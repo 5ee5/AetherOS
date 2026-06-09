@@ -89,6 +89,7 @@ void syscall_init(void)
 #define SYS_SLEEP     35U
 #define SYS_KILL      62U
 #define SYS_CHMOD     90U
+#define SYS_RENAME    82U
 #define SYS_SPAWN    500U
 #define SYS_SPAWN_AS 501U
 #define SYS_LISTDIR  600U
@@ -693,6 +694,10 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_CREAT:   return sys_creat(a0);
     case SYS_MKDIR:   return sys_mkdir(a0);
     case SYS_UNLINK:  return sys_unlink(a0);
+    case SYS_RENAME: {
+        if (a0 >= 0x800000000000ULL || a1 >= 0x800000000000ULL) return -14;
+        return vfs_rename((const char *)(uintptr_t)a0, (const char *)(uintptr_t)a1);
+    }
     case SYS_CHDIR:   return sys_chdir(a0);
     case SYS_GETCWD:  return sys_getcwd(a0, a1);
     case SYS_SOCKET:  return sys_socket(a0, a1, a2);

@@ -27,6 +27,7 @@ int      chmod(const char *path, int mode);
 int      creat(const char *path);
 int      mkdir(const char *path, int mode);
 int      unlink(const char *path);
+int      rename(const char *old_path, const char *new_path);
 int      chdir(const char *path);
 char    *getcwd(char *buf, long size);
 

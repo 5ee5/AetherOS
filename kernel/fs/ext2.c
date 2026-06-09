@@ -1040,6 +1040,72 @@ bool ext2_unlink(ext2_fs_t *fs, const char *path)
     return dir_remove_entry(fs, parent_ino, name);
 }
 
+bool ext2_rename(ext2_fs_t *fs, const char *old_path, const char *new_path)
+{
+    if (!fs || !old_path || !new_path) return false;
+
+    uint32_t src_ino = ext2_lookup_ino(fs, old_path);
+    if (!src_ino) return false;
+
+    char src_parent[256], src_name[256];
+    char dst_parent[256], dst_name[256];
+    if (!path_split(old_path, src_parent, src_name)) return false;
+    if (!path_split(new_path, dst_parent, dst_name)) return false;
+
+    uint32_t src_parent_ino = ext2_lookup_ino(fs, src_parent);
+    uint32_t dst_parent_ino = ext2_lookup_ino(fs, dst_parent);
+    if (!src_parent_ino || !dst_parent_ino) return false;
+
+    ext2_inode_t src_inode;
+    if (!read_inode(fs, src_ino, &src_inode)) return false;
+    uint8_t ftype = ((src_inode.i_mode & 0xF000u) == 0x4000u) ? 2 : 1;
+
+    /* If dest exists, remove it (files only; refuse to overwrite a dir). */
+    uint32_t dst_ino = ext2_lookup_ino(fs, new_path);
+    if (dst_ino) {
+        ext2_inode_t dst_inode;
+        if (!read_inode(fs, dst_ino, &dst_inode)) return false;
+        if ((dst_inode.i_mode & 0xF000u) == 0x4000u) return false;
+        ext2_unlink(fs, new_path);
+    }
+
+    if (!dir_add_entry(fs, dst_parent_ino, dst_name, src_ino, ftype)) return false;
+    if (!dir_remove_entry(fs, src_parent_ino, src_name)) {
+        dir_remove_entry(fs, dst_parent_ino, dst_name);
+        return false;
+    }
+
+    /* Update ".." inside a moved directory when parent changes. */
+    if (ftype == 2 && src_parent_ino != dst_parent_ino) {
+        uint8_t *blk = kmalloc(fs->block_size);
+        if (blk) {
+            for (int b = 0; b < 12; b++) {
+                uint32_t bno = src_inode.i_block[b];
+                if (!bno) break;
+                if (!read_block(fs, bno, blk)) continue;
+                uint8_t *p = blk, *end = blk + fs->block_size;
+                bool updated = false;
+                while (p < end) {
+                    ext2_dirent_t *de = (ext2_dirent_t *)p;
+                    if (de->rec_len == 0) break;
+                    if (de->inode != 0 && de->name_len == 2 &&
+                        de->name[0] == '.' && de->name[1] == '.') {
+                        de->inode = dst_parent_ino;
+                        write_block(fs, bno, blk);
+                        updated = true;
+                        break;
+                    }
+                    p += de->rec_len;
+                }
+                if (updated) break;
+            }
+            kfree(blk);
+        }
+    }
+
+    return true;
+}
+
 bool ext2_inode_stat(ext2_fs_t *fs, uint32_t ino, uint16_t *out_mode,
                      uint32_t *out_uid, uint32_t *out_gid)
 {

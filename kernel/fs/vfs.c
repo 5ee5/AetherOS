@@ -317,3 +317,9 @@ int vfs_stat(const char *path, ext2_stat_t *out)
     if (!ext2_lookup(s_root_fs, path, &ino)) return -1;
     return ext2_stat_full(s_root_fs, ino, out) ? 0 : -1;
 }
+
+int vfs_rename(const char *old_path, const char *new_path)
+{
+    if (!s_root_fs) return -1;
+    return ext2_rename(s_root_fs, old_path, new_path) ? 0 : -1;
+}

@@ -136,6 +136,11 @@ int unlink(const char *path)
     return (int)__sc1(87, (long)path);
 }
 
+int rename(const char *old_path, const char *new_path)
+{
+    return (int)__sc2(82, (long)old_path, (long)new_path);
+}
+
 int chdir(const char *path)
 {
     return (int)__sc1(80, (long)path);

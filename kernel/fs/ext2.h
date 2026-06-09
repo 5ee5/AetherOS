@@ -50,6 +50,10 @@ uint32_t ext2_mkdir(ext2_fs_t *fs, const char *path, uint32_t uid, uint32_t gid)
    Returns true on success. */
 bool ext2_unlink(ext2_fs_t *fs, const char *path);
 
+/* Rename/move `old_path` to `new_path`. If `new_path` exists as a regular file
+   it is replaced. Returns true on success. */
+bool ext2_rename(ext2_fs_t *fs, const char *old_path, const char *new_path);
+
 /* Truncate inode `ino` to zero length (frees all data blocks). */
 bool ext2_truncate(ext2_fs_t *fs, uint32_t ino);
 

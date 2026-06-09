@@ -59,4 +59,7 @@ int vfs_chmod(const char *path, uint16_t mode);
 /* Fill `out` with full file metadata. Returns 0 on success, -1 on error. */
 int vfs_stat(const char *path, ext2_stat_t *out);
 
+/* Rename or move `old_path` to `new_path`. Returns 0 on success, -1 on error. */
+int vfs_rename(const char *old_path, const char *new_path);
+
 #endif
