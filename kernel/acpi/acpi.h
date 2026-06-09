@@ -21,5 +21,7 @@ struct acpi_madt_info {
 
 void acpi_init(uint64_t rsdp_phys, uint64_t direct_map_base);
 const struct acpi_madt_info *acpi_madt(void);
+void acpi_poweroff(void);
+void acpi_reboot(void);
 
 #endif

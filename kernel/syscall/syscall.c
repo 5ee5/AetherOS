@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "acpi/acpi.h"
 #include "core/serial.h"
 #include "exec/elf.h"
 #include "fs/vfs.h"
@@ -628,6 +629,13 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_SEND:    return sys_send(a0, a1, a2, a3);
     case SYS_RECV:    return sys_recv(a0, a1, a2, a3);
     case SYS_DNS:     return sys_dns(a0, a1);
+    case 169: {   /* sys_reboot — root-only */
+        struct process *p = sched_current_process();
+        if (!p || p->cred.uid != 0) return -1;
+        if (a0 == 0) acpi_poweroff();
+        else         acpi_reboot();
+        return 0;
+    }
     default:
         serial_write("syscall: unknown nr=");
         serial_write_dec(nr);

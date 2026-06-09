@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "arch/x86_64/io.h"
 #include "core/panic.h"
 #include "core/serial.h"
 
@@ -45,6 +46,24 @@ struct madt {
 	/* Followed by variable-length interrupt controller structures. */
 } __attribute__((packed));
 
+/* Fixed ACPI Description Table (FACP) — key fields only. */
+struct fadt {
+	struct sdt_header header;   /* 0 — 36 bytes */
+	uint32_t firmware_ctrl;     /* 36 */
+	uint32_t dsdt;              /* 40 — 32-bit physical address of DSDT */
+	uint8_t  pad1[20];          /* 44 — skip to pm1a_cnt_blk */
+	uint32_t pm1a_cnt_blk;      /* 64 — I/O port for PM1a control (16-bit wide) */
+	uint32_t pm1b_cnt_blk;      /* 68 — I/O port for PM1b control, 0 if absent */
+	uint8_t  pad2[44];          /* 72 — skip to reset_reg at 116 */
+	/* ACPI 2.0+ reset register (Generic Address Structure = 12 bytes): */
+	uint8_t  reset_reg_space;   /* 116 — 0=memory, 1=I/O */
+	uint8_t  reset_reg_bw;      /* 117 */
+	uint8_t  reset_reg_bo;      /* 118 */
+	uint8_t  reset_reg_acc;     /* 119 */
+	uint64_t reset_reg_addr;    /* 120 */
+	uint8_t  reset_value;       /* 128 */
+} __attribute__((packed));
+
 /* MADT interrupt controller structure types. */
 #define MADT_TYPE_LOCAL_APIC  0
 #define MADT_TYPE_IOAPIC      1
@@ -75,6 +94,12 @@ struct madt_local_apic {
 static uint64_t dm_base;
 static struct acpi_madt_info madt_info;
 static bool madt_valid;
+
+/* FADT-derived state for poweroff / reboot */
+static uint16_t s_pm1a_cnt;    /* I/O port; 0 = not found */
+static uint16_t s_pm1b_cnt;    /* I/O port; 0 = absent */
+static uint8_t  s_slp_typ_s5 = 5u; /* default covers QEMU; updated by DSDT scan */
+static bool     s_fadt_valid;
 
 /* ---- Helpers ---------------------------------------------------------- */
 
@@ -150,9 +175,51 @@ static void parse_madt(const struct madt *m)
 	serial_write("\n");
 }
 
+static void parse_fadt(const struct fadt *f)
+{
+	if (!verify_checksum(f, f->header.length)) {
+		serial_write("acpi: FADT checksum invalid, skipping\n");
+		return;
+	}
+
+	s_pm1a_cnt = (uint16_t)(f->pm1a_cnt_blk & 0xffffu);
+	s_pm1b_cnt = (uint16_t)(f->pm1b_cnt_blk & 0xffffu);
+
+	/* Best-effort _S5_ scan in the DSDT to find SLP_TYP for S5 sleep.
+	   AML: NameOp "_S5_" PackageOp PkgLength NumElems BytePrefix SLP_TYP ...
+	   We look for the "_S5_" bytes then find the first 0x0A (BytePrefix) within
+	   14 bytes and take the following byte as SLP_TYP_S5. */
+	if (f->dsdt != 0) {
+		const struct sdt_header *dsdt =
+			(const struct sdt_header *)phys((uint64_t)f->dsdt);
+		const uint8_t *d = (const uint8_t *)dsdt;
+		uint32_t len = dsdt->length;
+		for (uint32_t i = 4; i + 14 < len; ++i) {
+			if (d[i] == '_' && d[i+1] == 'S' &&
+			    d[i+2] == '5' && d[i+3] == '_') {
+				for (uint32_t j = i + 4; j < i + 18 && j + 1 < len; ++j) {
+					if (d[j] == 0x0au) {
+						s_slp_typ_s5 = d[j + 1];
+						break;
+					}
+				}
+				break;
+			}
+		}
+	}
+
+	s_fadt_valid = true;
+	serial_write("acpi: FADT pm1a_cnt=");
+	serial_write_hex(s_pm1a_cnt);
+	serial_write(" slp_typ_s5=");
+	serial_write_dec(s_slp_typ_s5);
+	serial_write("\n");
+}
+
 static void scan_sdt_entries(const void *entries, uint32_t count,
                               uint32_t entry_size)
 {
+	bool found_madt = false;
 	const uint8_t *p = (const uint8_t *)entries;
 	for (uint32_t i = 0; i < count; ++i, p += entry_size) {
 		uint64_t addr;
@@ -166,10 +233,14 @@ static void scan_sdt_entries(const void *entries, uint32_t count,
 		if (hdr->signature[0] == 'A' && hdr->signature[1] == 'P' &&
 			hdr->signature[2] == 'I' && hdr->signature[3] == 'C') {
 			parse_madt((const struct madt *)hdr);
-			return;
+			found_madt = true;
+		} else if (hdr->signature[0] == 'F' && hdr->signature[1] == 'A' &&
+			hdr->signature[2] == 'C' && hdr->signature[3] == 'P') {
+			parse_fadt((const struct fadt *)hdr);
 		}
 	}
-	serial_write("acpi: MADT not found\n");
+	if (!found_madt)
+		serial_write("acpi: MADT not found\n");
 }
 
 static void parse_xsdt(const struct xsdt *x)
@@ -244,4 +315,21 @@ const struct acpi_madt_info *acpi_madt(void)
 		return NULL;
 	}
 	return &madt_info;
+}
+
+void acpi_poweroff(void)
+{
+	if (s_fadt_valid && s_pm1a_cnt != 0u) {
+		uint16_t slp_val = (uint16_t)(((uint16_t)s_slp_typ_s5 << 10) | (1u << 13));
+		outw(s_pm1a_cnt, slp_val);
+		if (s_pm1b_cnt != 0u)
+			outw(s_pm1b_cnt, slp_val);
+	}
+	for (;;) __asm__ volatile("hlt");
+}
+
+void acpi_reboot(void)
+{
+	outb(0xCF9u, 0x06u);   /* PCI hard reset */
+	for (;;) __asm__ volatile("hlt");
 }

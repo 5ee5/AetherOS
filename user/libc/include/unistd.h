@@ -28,6 +28,10 @@ int      unlink(const char *path);
 int      chdir(const char *path);
 char    *getcwd(char *buf, long size);
 
+int      reboot(int cmd);
+#define REBOOT_CMD_POWEROFF  0
+#define REBOOT_CMD_RESTART   1
+
 /* O_CREAT flag */
 #define O_RDONLY  0
 #define O_WRONLY  1
