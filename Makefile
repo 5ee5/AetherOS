@@ -34,6 +34,7 @@ KERNEL_C_SRCS := \
 	kernel/core/panic.c \
 	kernel/core/serial.c \
 	kernel/drivers/ahci.c \
+	kernel/drivers/nvme.c \
 	kernel/drivers/e1000.c \
 	kernel/drivers/pci.c \
 	kernel/drivers/ps2kbd.c \

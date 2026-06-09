@@ -11,6 +11,7 @@
 #include "arch/x86_64/tss.h"
 #include "arch/x86_64/io.h"
 #include "drivers/ahci.h"
+#include "drivers/nvme.h"
 #include "drivers/ps2kbd.h"
 #include "fs/vfs.h"
 #include "gui/desktop.h"
@@ -178,6 +179,7 @@ void kernel_main(const struct os_boot_info *boot_info)
 	run_early_self_checks();
 
 	ahci_init();
+	nvme_init();
 	vfs_init();
 	ps2kbd_init();
 

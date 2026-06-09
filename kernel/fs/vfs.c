@@ -7,6 +7,7 @@
 #include "block/gpt.h"
 #include "core/serial.h"
 #include "drivers/ahci.h"
+#include "drivers/nvme.h"
 #include "fs/ext2.h"
 #include "lib/string.h"
 #include "mem/heap.h"
@@ -59,6 +60,36 @@ typedef struct {
 
 static vfs_file_t s_files[VFS_MAX_OPEN];
 
+/* ---- NVMe-backed block device -------------------------------------------- */
+
+static bool nvme_blkdev_read(blkdev_t *self, uint64_t lba, uint32_t count, void *buf)
+{
+    (void)self;
+    uint8_t *p = (uint8_t *)buf;
+    while (count > 0) {
+        uint16_t batch = (count > 8) ? 8 : (uint16_t)count;
+        if (!nvme_read_sectors(lba, batch, p)) return false;
+        p     += (uint64_t)batch * 512;
+        lba   += batch;
+        count -= batch;
+    }
+    return true;
+}
+
+static bool nvme_blkdev_write(blkdev_t *self, uint64_t lba, uint32_t count, const void *buf)
+{
+    (void)self;
+    const uint8_t *p = (const uint8_t *)buf;
+    while (count > 0) {
+        uint16_t batch = (count > 8) ? 8 : (uint16_t)count;
+        if (!nvme_write_sectors(lba, batch, p)) return false;
+        p     += (uint64_t)batch * 512;
+        lba   += batch;
+        count -= batch;
+    }
+    return true;
+}
+
 /* ---- State ---------------------------------------------------------------- */
 
 static ext2_fs_t      *s_root_fs;
@@ -70,17 +101,23 @@ static ahci_blkdev_priv_t s_blkpriv;
 bool vfs_init(void)
 {
     int disk = ahci_first_disk();
-    if (disk < 0) {
+    if (disk >= 0) {
+        s_blkpriv.port        = (uint8_t)disk;
+        s_blkdev.sector_size  = 512;
+        s_blkdev.sector_count = 0;
+        s_blkdev.read         = ahci_blkdev_read;
+        s_blkdev.write        = ahci_blkdev_write;
+        s_blkdev.priv         = &s_blkpriv;
+    } else if (nvme_first_ns() >= 0) {
+        s_blkdev.sector_size  = 512;
+        s_blkdev.sector_count = 0;
+        s_blkdev.read         = nvme_blkdev_read;
+        s_blkdev.write        = nvme_blkdev_write;
+        s_blkdev.priv         = NULL;
+    } else {
         serial_write("vfs: no disk\n");
         return false;
     }
-
-    s_blkpriv.port        = (uint8_t)disk;
-    s_blkdev.sector_size  = 512;
-    s_blkdev.sector_count = 0;
-    s_blkdev.read         = ahci_blkdev_read;
-    s_blkdev.write        = ahci_blkdev_write;
-    s_blkdev.priv         = &s_blkpriv;
 
     /* Find first GPT partition. */
     gpt_partition_t parts[4];
