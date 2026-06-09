@@ -20,6 +20,7 @@ struct process {
     volatile int32_t exit_status;
     struct thread   *wait_queue;  /* threads blocked in sys_waitpid */
     char             cwd[256];
+    char             name[32];    /* basename of spawned ELF path */
 };
 
 /* Create a process from an already-loaded ELF result (entry/user_sp/cr3). */
@@ -33,5 +34,8 @@ struct process *process_find(uint32_t pid);
 
 /* Forcibly terminate a process (SIGKILL semantics). Safe to call from kernel. */
 void process_kill(struct process *proc);
+
+/* Fill buf with a human-readable process table (null-terminated). */
+void process_ps(char *buf, uint32_t bufsz);
 
 #endif

@@ -944,10 +944,45 @@ execute:
     lea rsi, [cmd_exit]
     mov rdi, r12
     call streq
-    jnz .try_spawn
+    jnz .try_history
     mov rax, SYS_EXIT
     xor rdi, rdi
     syscall
+
+    ; ---- Built-in: history ----
+.try_history:
+    lea rsi, [cmd_history]
+    mov rdi, r12
+    call streq
+    jnz .try_spawn
+
+    mov rbx, [hist_count]
+    test rbx, rbx
+    jz .hist_done
+    xor r14, r14              ; i = 0
+.hist_loop:
+    cmp r14, rbx
+    jge .hist_done
+    ; slot = (hist_head - hist_count + i + 40) % 20
+    mov rax, [hist_head]
+    sub rax, [hist_count]
+    add rax, r14
+    add rax, 40
+    xor rdx, rdx
+    mov rcx, 20
+    div rcx                   ; rdx = slot (remainder)
+    imul rdx, rdx, 256
+    lea rsi, [history + rdx]
+    call writestr
+    mov rax, SYS_WRITE
+    mov rdi, 1
+    lea rsi, [nl]
+    mov rdx, 1
+    syscall
+    inc r14
+    jmp .hist_loop
+.hist_done:
+    jmp .ex_done
 
     ; ---- External spawn ----
 .try_spawn:
@@ -1071,8 +1106,9 @@ cmd_pwd:    db "pwd", 0
 cmd_clear:  db "clear", 0
 cmd_uname:  db "uname", 0
 cmd_help:   db "help", 0
-cmd_exit:   db "exit", 0
-root_path:  db "/", 0
+cmd_exit:    db "exit", 0
+cmd_history: db "history", 0
+root_path:   db "/", 0
 
 bs256: times 256 db 8
 sp256: times 256 db 32

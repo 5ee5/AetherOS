@@ -165,3 +165,18 @@ int reboot(int cmd)
 {
     return (int)__sc1(169, (long)cmd);
 }
+
+int sleep_ms(long ms)
+{
+    return (int)__sc1(35, ms);
+}
+
+int kill(int pid)
+{
+    return (int)__sc1(62, (long)pid);
+}
+
+long ps_list(char *buf, long bufsz)
+{
+    return __sc2(603, (long)buf, bufsz);
+}

@@ -23,9 +23,11 @@ struct thread {
 	bool           is_idle;    /* never add to run queue */
 	bool           is_user;    /* ring-3 thread; cr3 is valid */
 	uint64_t       cr3;        /* PML4 phys for user thread (0 = kernel) */
-	struct thread *run_next;   /* run queue linkage */
-	struct thread *wait_next;  /* wait/blocked queue linkage */
-	void          *process;    /* owning struct process, or NULL */
+	struct thread *run_next;     /* run queue linkage */
+	struct thread *wait_next;    /* wait/blocked queue linkage */
+	struct thread *sleep_next;   /* sleep queue linkage */
+	uint64_t       sleep_deadline; /* tick at which to wake (0 = not sleeping) */
+	void          *process;      /* owning struct process, or NULL */
 };
 
 /* Create a new kernel thread. Added to run queue automatically. */

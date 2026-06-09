@@ -29,4 +29,7 @@ void sched_ap_enter(void);
 /* Assembly idle loop (defined in sched_asm.asm). */
 void sched_idle_loop(void);
 
+/* Block the current thread for approximately ms milliseconds (~1ms/tick). */
+void sched_sleep_ms(uint64_t ms);
+
 #endif

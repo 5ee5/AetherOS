@@ -86,11 +86,14 @@ void syscall_init(void)
 #define SYS_CHOWN     92U
 #define SYS_SETUID   105U
 #define SYS_SETGID   106U
+#define SYS_SLEEP     35U
+#define SYS_KILL      62U
 #define SYS_SPAWN    500U
 #define SYS_SPAWN_AS 501U
 #define SYS_LISTDIR  600U
 #define SYS_CREAT    601U
 #define SYS_DNS      602U
+#define SYS_PS       603U
 
 static fd_table_t *current_fds(void);
 
@@ -388,6 +391,16 @@ static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
     struct process *proc = process_create_from_result(&result);
     if (!proc) return -1;
 
+    /* Store process name from the basename of path. */
+    {
+        const char *base = path;
+        for (const char *p = path; *p; p++)
+            if (*p == '/') base = p + 1;
+        uint32_t i = 0;
+        while (i < 31 && base[i]) { proc->name[i] = base[i]; i++; }
+        proc->name[i] = '\0';
+    }
+
     /* Inherit credentials from parent. */
     {
         struct thread *ct = sched_current();
@@ -629,6 +642,21 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_SEND:    return sys_send(a0, a1, a2, a3);
     case SYS_RECV:    return sys_recv(a0, a1, a2, a3);
     case SYS_DNS:     return sys_dns(a0, a1);
+    case SYS_SLEEP:   sched_sleep_ms(a0); return 0;
+    case SYS_KILL: {
+        struct process *caller = sched_current_process();
+        if (!caller) return -1;
+        struct process *victim = process_find((uint32_t)a0);
+        if (!victim) return -3; /* ESRCH */
+        if (caller->cred.euid != 0 && caller->cred.uid != victim->cred.uid) return -1;
+        process_kill(victim);
+        return 0;
+    }
+    case SYS_PS: {
+        if (a0 >= 0x800000000000ULL) return -14;
+        process_ps((char *)(uintptr_t)a0, (uint32_t)a1);
+        return 0;
+    }
     case 169: {   /* sys_reboot — root-only */
         struct process *p = sched_current_process();
         if (!p || p->cred.uid != 0) return -1;

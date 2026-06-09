@@ -27,6 +27,9 @@ static spinlock_t rq_lock = SPINLOCK_INIT;
 static struct thread *rq_head;
 static struct thread *rq_tail;
 
+static volatile uint64_t g_ticks;
+static struct thread *sleep_head;  /* protected by rq_lock */
+
 static void rq_add(struct thread *t)
 {
 	t->run_next = NULL;
@@ -133,6 +136,21 @@ uint64_t sched_tick(uint64_t old_rsp)
 
 	spinlock_acquire(&rq_lock);
 
+	/* Advance tick counter and wake any expired sleepers. */
+	g_ticks++;
+	struct thread **sp = &sleep_head;
+	while (*sp) {
+		struct thread *st = *sp;
+		if (st->sleep_deadline <= g_ticks) {
+			*sp = st->sleep_next;
+			st->sleep_next = NULL;
+			st->state = THREAD_READY;
+			rq_add(st);
+		} else {
+			sp = &st->sleep_next;
+		}
+	}
+
 	/* Re-enqueue current thread only if it was preempted while RUNNING. */
 	if (cur->state == THREAD_RUNNING && !cur->is_idle) {
 		cur->state = THREAD_READY;
@@ -161,6 +179,23 @@ uint64_t sched_tick(uint64_t old_rsp)
 	}
 
 	return next->rsp;
+}
+
+void sched_sleep_ms(uint64_t ms)
+{
+	struct thread *t = sched_current();
+	if (!t || t->is_idle) return;
+
+	spinlock_acquire(&rq_lock);
+	t->sleep_deadline = g_ticks + ms;
+	t->state          = THREAD_BLOCKED;
+	t->sleep_next     = sleep_head;
+	sleep_head        = t;
+	spinlock_release(&rq_lock);
+
+	__asm__ volatile("cli" ::: "memory");
+	__asm__ volatile("int $0x20" ::: "memory");
+	__asm__ volatile("sti" ::: "memory");
 }
 
 void sched_ap_prepare(uint32_t cpu_id)

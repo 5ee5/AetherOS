@@ -37,6 +37,7 @@ struct process *process_create_from_result(const elf_load_result_t *r)
     proc->exited      = false;
     proc->exit_status = 0;
     proc->wait_queue  = NULL;
+    proc->name[0]     = '\0';
     struct process *parent = sched_current_process();
     if (parent && parent->cwd[0]) {
         strncpy(proc->cwd, parent->cwd, sizeof(proc->cwd) - 1);
@@ -86,6 +87,48 @@ void process_kill(struct process *proc)
     }
     /* Mark the process thread as dead. */
     if (proc->thread) proc->thread->state = THREAD_DEAD;
+}
+
+static uint32_t ps_fmt_uint(char *out, uint32_t val, uint32_t width)
+{
+    char tmp[12];
+    uint32_t len = 0;
+    if (val == 0) { tmp[len++] = '0'; }
+    else { while (val) { tmp[len++] = (char)('0' + val % 10); val /= 10; } }
+    /* reverse */
+    for (uint32_t i = 0, j = len - 1; i < j; i++, j--) {
+        char c = tmp[i]; tmp[i] = tmp[j]; tmp[j] = c;
+    }
+    uint32_t off = 0;
+    while (off + len < width) out[off++] = ' ';
+    for (uint32_t k = 0; k < len; k++) out[off++] = tmp[k];
+    return off;
+}
+
+void process_ps(char *buf, uint32_t bufsz)
+{
+    static const char hdr[] = "  PID   UID  NAME\n";
+    uint32_t off = 0;
+    for (uint32_t i = 0; hdr[i] && off + 1 < bufsz; i++)
+        buf[off++] = hdr[i];
+
+    for (int i = 0; i < MAX_PROCS; ++i) {
+        struct process *p = s_procs[i];
+        if (!p || p->exited) continue;
+        if (off + 48 >= bufsz) break;
+
+        off += ps_fmt_uint(buf + off, p->pid, 5);
+        buf[off++] = ' ';
+        off += ps_fmt_uint(buf + off, p->cred.uid, 5);
+        buf[off++] = ' ';
+        buf[off++] = ' ';
+
+        const char *nm = p->name[0] ? p->name : "?";
+        for (uint32_t k = 0; nm[k] && off + 1 < bufsz; k++)
+            buf[off++] = nm[k];
+        buf[off++] = '\n';
+    }
+    if (off < bufsz) buf[off] = '\0';
 }
 
 struct process *process_create_from_elf(const void *elf_data, uint64_t size)

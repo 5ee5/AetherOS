@@ -32,6 +32,10 @@ int      reboot(int cmd);
 #define REBOOT_CMD_POWEROFF  0
 #define REBOOT_CMD_RESTART   1
 
+int      sleep_ms(long ms);
+int      kill(int pid);
+long     ps_list(char *buf, long bufsz);
+
 /* O_CREAT flag */
 #define O_RDONLY  0
 #define O_WRONLY  1
