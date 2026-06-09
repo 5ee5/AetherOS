@@ -47,7 +47,7 @@ if [ -f build/shell.elf ]; then
     debugfs -w "$IMG?offset=${EXT2_OFFSET}" \
         -R "write build/shell.elf bin/shell" 2>/dev/null
 fi
-for prog in ls cat wc uname pwd mkdir rm cp wget grep touch head tail sort find login whoami id passwd useradd sudo; do
+for prog in ls cat wc uname pwd mkdir rm cp wget grep touch head tail sort find login whoami id passwd useradd sudo poweroff reboot; do
     if [ -f "build/bin/${prog}.elf" ]; then
         debugfs -w "$IMG?offset=${EXT2_OFFSET}" \
             -R "write build/bin/${prog}.elf bin/${prog}" 2>/dev/null
