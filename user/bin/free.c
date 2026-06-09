@@ -4,11 +4,11 @@
 static void print_size(uint64_t bytes)
 {
     if (bytes >= 1024UL * 1024 * 1024)
-        printf("%luG", (unsigned long)(bytes / (1024UL * 1024 * 1024)));
+        printf("%8luG", (unsigned long)(bytes / (1024UL * 1024 * 1024)));
     else if (bytes >= 1024UL * 1024)
-        printf("%luM", (unsigned long)(bytes / (1024UL * 1024)));
+        printf("%8luM", (unsigned long)(bytes / (1024UL * 1024)));
     else
-        printf("%luK", (unsigned long)(bytes / 1024UL));
+        printf("%8luK", (unsigned long)(bytes / 1024UL));
 }
 
 int main(void)
