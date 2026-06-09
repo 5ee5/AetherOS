@@ -201,3 +201,19 @@ long ps_list(char *buf, long bufsz)
 {
     return __sc2(603, (long)buf, bufsz);
 }
+
+int meminfo(uint64_t *total, uint64_t *free)
+{
+    uint64_t buf[2];
+    int r = (int)__sc1(604, (long)buf);
+    if (r == 0) { *total = buf[0]; *free = buf[1]; }
+    return r;
+}
+
+int diskinfo(uint64_t *total, uint64_t *free)
+{
+    uint64_t buf[2];
+    int r = (int)__sc1(605, (long)buf);
+    if (r == 0) { *total = buf[0]; *free = buf[1]; }
+    return r;
+}

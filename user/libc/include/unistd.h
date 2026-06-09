@@ -38,6 +38,8 @@ int      reboot(int cmd);
 int      sleep_ms(long ms);
 int      kill(int pid);
 long     ps_list(char *buf, long bufsz);
+int      meminfo(uint64_t *total, uint64_t *free);
+int      diskinfo(uint64_t *total, uint64_t *free);
 
 /* O_CREAT flag */
 #define O_RDONLY  0

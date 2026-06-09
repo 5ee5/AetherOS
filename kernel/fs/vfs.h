@@ -62,4 +62,7 @@ int vfs_stat(const char *path, ext2_stat_t *out);
 /* Rename or move `old_path` to `new_path`. Returns 0 on success, -1 on error. */
 int vfs_rename(const char *old_path, const char *new_path);
 
+/* Return total and free bytes on the root filesystem. */
+void vfs_disk_stats(uint64_t *total_bytes, uint64_t *free_bytes);
+
 #endif

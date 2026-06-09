@@ -79,4 +79,7 @@ bool ext2_inode_chown(ext2_fs_t *fs, uint32_t ino, uint32_t uid, uint32_t gid);
 /* Change permission bits on the file at `path`. Returns 0 on success, -1 on error. */
 int ext2_chmod(ext2_fs_t *fs, const char *path, uint16_t mode);
 
+/* Return total and free disk bytes from the superblock. */
+void ext2_disk_stats(ext2_fs_t *fs, uint64_t *total_bytes, uint64_t *free_bytes);
+
 #endif

@@ -9,6 +9,7 @@
 #include "fs/vfs.h"
 #include "lib/string.h"
 #include "mem/heap.h"
+#include "mem/pmm.h"
 #include "mem/vmm.h"
 #include "net/dns.h"
 #include "net/socket.h"
@@ -96,6 +97,8 @@ void syscall_init(void)
 #define SYS_CREAT    601U
 #define SYS_DNS      602U
 #define SYS_PS       603U
+#define SYS_MEMINFO  604U
+#define SYS_DISKINFO 605U
 
 static fd_table_t *current_fds(void);
 
@@ -727,6 +730,19 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_PS: {
         if (a0 >= 0x800000000000ULL) return -14;
         process_ps((char *)(uintptr_t)a0, (uint32_t)a1);
+        return 0;
+    }
+    case SYS_MEMINFO: {
+        if (a0 >= 0x800000000000ULL) return -14;
+        uint64_t *out = (uint64_t *)(uintptr_t)a0;
+        out[0] = pmm_total_pages() * 4096ULL;
+        out[1] = pmm_free_pages()  * 4096ULL;
+        return 0;
+    }
+    case SYS_DISKINFO: {
+        if (a0 >= 0x800000000000ULL) return -14;
+        uint64_t *out = (uint64_t *)(uintptr_t)a0;
+        vfs_disk_stats(&out[0], &out[1]);
         return 0;
     }
     case 169: {   /* sys_reboot — root-only */

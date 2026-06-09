@@ -323,3 +323,8 @@ int vfs_rename(const char *old_path, const char *new_path)
     if (!s_root_fs) return -1;
     return ext2_rename(s_root_fs, old_path, new_path) ? 0 : -1;
 }
+
+void vfs_disk_stats(uint64_t *total_bytes, uint64_t *free_bytes)
+{
+    ext2_disk_stats(s_root_fs, total_bytes, free_bytes);
+}

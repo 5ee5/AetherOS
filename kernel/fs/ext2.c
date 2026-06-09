@@ -1149,3 +1149,10 @@ bool ext2_inode_chown(ext2_fs_t *fs, uint32_t ino, uint32_t uid, uint32_t gid)
     inode.i_gid = (uint16_t)gid;
     return write_inode(fs, ino, &inode);
 }
+
+void ext2_disk_stats(ext2_fs_t *fs, uint64_t *total_bytes, uint64_t *free_bytes)
+{
+    if (!fs) { *total_bytes = 0; *free_bytes = 0; return; }
+    *total_bytes = (uint64_t)fs->cached_sb.s_blocks_count * fs->block_size;
+    *free_bytes  = (uint64_t)fs->cached_sb.s_free_blocks_count * fs->block_size;
+}
