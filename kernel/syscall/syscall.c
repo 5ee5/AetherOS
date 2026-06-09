@@ -534,11 +534,37 @@ static int64_t sys_pipe(uint64_t pipefd_virt)
     return 0;
 }
 
-static int64_t sys_listdir(uint64_t path_virt, uint64_t buf_virt, uint64_t bufsz)
+static int64_t sys_listdir(uint64_t path_virt, uint64_t buf_virt,
+                           uint64_t bufsz, uint64_t flags)
 {
     if (path_virt >= 0x800000000000ULL || buf_virt >= 0x800000000000ULL) return -14;
     return (int64_t)vfs_listdir((const char *)(uintptr_t)path_virt,
-                                 (char *)(uintptr_t)buf_virt, (uint32_t)bufsz);
+                                 (char *)(uintptr_t)buf_virt,
+                                 (uint32_t)bufsz, (uint32_t)flags);
+}
+
+static int64_t sys_stat(uint64_t path_virt, uint64_t buf_virt)
+{
+    if (path_virt >= 0x800000000000ULL || buf_virt >= 0x800000000000ULL) return -14;
+    const char *path = (const char *)(uintptr_t)path_virt;
+    /* Layout must match user-space struct stat in sys/stat.h */
+    struct {
+        uint16_t mode;
+        uint16_t nlink;
+        uint32_t uid;
+        uint32_t gid;
+        uint32_t size;
+        uint32_t mtime;
+    } __attribute__((packed)) *ubuf = (void *)(uintptr_t)buf_virt;
+    ext2_stat_t st;
+    if (vfs_stat(path, &st) < 0) return -2; /* ENOENT */
+    ubuf->mode  = st.mode;
+    ubuf->nlink = st.nlink;
+    ubuf->uid   = st.uid;
+    ubuf->gid   = st.gid;
+    ubuf->size  = st.size;
+    ubuf->mtime = st.mtime;
+    return 0;
 }
 
 static int64_t sys_creat(uint64_t path_virt)
@@ -662,7 +688,8 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_PIPE:      return sys_pipe(a0);
     case SYS_SPAWN:     return sys_spawn(a0, a1, (int64_t)a2, (int64_t)a3);
     case SYS_SPAWN_AS:  return sys_spawn_as(a0, a1, a2, a3);
-    case SYS_LISTDIR: return sys_listdir(a0, a1, a2);
+    case SYS_STAT:    return sys_stat(a0, a1);
+    case SYS_LISTDIR: return sys_listdir(a0, a1, a2, a3);
     case SYS_CREAT:   return sys_creat(a0);
     case SYS_MKDIR:   return sys_mkdir(a0);
     case SYS_UNLINK:  return sys_unlink(a0);

@@ -708,7 +708,8 @@ uint32_t ext2_lookup_ino(ext2_fs_t *fs, const char *path)
 }
 
 static uint32_t list_dir_block(const uint8_t *block, uint32_t block_size,
-                                char *buf, uint32_t bufsz, uint32_t written)
+                                char *buf, uint32_t bufsz, uint32_t written,
+                                uint32_t flags)
 {
     const uint8_t *p   = block;
     const uint8_t *end = block + block_size;
@@ -716,15 +717,18 @@ static uint32_t list_dir_block(const uint8_t *block, uint32_t block_size,
         const ext2_dirent_t *de = (const ext2_dirent_t *)p;
         if (de->rec_len == 0) break;
         if (de->inode != 0 && de->name_len > 0) {
-            /* Skip . and .. */
-            if (!(de->name_len == 1 && de->name[0] == '.') &&
-                !(de->name_len == 2 && de->name[0] == '.' && de->name[1] == '.')) {
-                uint8_t nlen = de->name_len;
-                if (written + nlen + 1 < bufsz) {
-                    memcpy(buf + written, de->name, nlen);
-                    written += nlen;
-                    buf[written++] = '\n';
-                }
+            bool is_dot = (de->name_len == 1 && de->name[0] == '.');
+            bool is_dotdot = (de->name_len == 2 &&
+                              de->name[0] == '.' && de->name[1] == '.');
+            if ((is_dot || is_dotdot) && !(flags & 1u)) {
+                p += de->rec_len;
+                continue;
+            }
+            uint8_t nlen = de->name_len;
+            if (written + nlen + 1 < bufsz) {
+                memcpy(buf + written, de->name, nlen);
+                written += nlen;
+                buf[written++] = '\n';
             }
         }
         p += de->rec_len;
@@ -732,7 +736,8 @@ static uint32_t list_dir_block(const uint8_t *block, uint32_t block_size,
     return written;
 }
 
-uint32_t ext2_list_dir(ext2_fs_t *fs, uint32_t dir_ino, char *buf, uint32_t bufsz)
+uint32_t ext2_list_dir(ext2_fs_t *fs, uint32_t dir_ino,
+                       char *buf, uint32_t bufsz, uint32_t flags)
 {
     if (!buf || bufsz == 0) return 0;
     ext2_inode_t inode;
@@ -742,11 +747,10 @@ uint32_t ext2_list_dir(ext2_fs_t *fs, uint32_t dir_ino, char *buf, uint32_t bufs
     for (int b = 0; b < 12; ++b) {
         if (inode.i_block[b] == 0) break;
         if (!read_block(fs, inode.i_block[b], fs->scratch)) break;
-        written = list_dir_block(fs->scratch, fs->block_size, buf, bufsz, written);
+        written = list_dir_block(fs->scratch, fs->block_size, buf, bufsz, written, flags);
     }
     if (written < bufsz) buf[written] = '\0';
-    return written;
-}
+    return written;}
 
 /* ---- Write API ------------------------------------------------------------- */
 
@@ -1044,6 +1048,19 @@ bool ext2_inode_stat(ext2_fs_t *fs, uint32_t ino, uint16_t *out_mode,
     if (out_mode) *out_mode = inode.i_mode;
     if (out_uid)  *out_uid  = inode.i_uid;
     if (out_gid)  *out_gid  = inode.i_gid;
+    return true;
+}
+
+bool ext2_stat_full(ext2_fs_t *fs, uint32_t ino, ext2_stat_t *out)
+{
+    ext2_inode_t inode;
+    if (!read_inode(fs, ino, &inode)) return false;
+    out->mode  = inode.i_mode;
+    out->nlink = inode.i_links_count;
+    out->uid   = inode.i_uid;
+    out->gid   = inode.i_gid;
+    out->size  = inode.i_size;
+    out->mtime = inode.i_mtime;
     return true;
 }
 

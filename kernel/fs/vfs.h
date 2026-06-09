@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "fs/ext2.h"
+
 /* Mount the root filesystem (backed by the first AHCI disk + GPT partition 0 + ext2). */
 bool vfs_init(void);
 
@@ -20,8 +22,9 @@ void vfs_close(int fd);
 uint64_t vfs_file_size(const char *path);
 
 /* List entries in directory `path` into `buf` as "name\n" lines.
+   flags bit 0: include "." and "..".
    Returns bytes written (not including NUL), 0 on error. */
-uint32_t vfs_listdir(const char *path, char *buf, uint32_t bufsz);
+uint32_t vfs_listdir(const char *path, char *buf, uint32_t bufsz, uint32_t flags);
 
 /* Write up to `size` bytes from `buf` to open fd.  Returns bytes written or <0. */
 int64_t vfs_write(int fd, const void *buf, uint32_t size);
@@ -52,5 +55,8 @@ int vfs_chown(const char *path, uint32_t uid, uint32_t gid);
 
 /* Change permission bits of a file. Returns 0 on success, -1 on error. */
 int vfs_chmod(const char *path, uint16_t mode);
+
+/* Fill `out` with full file metadata. Returns 0 on success, -1 on error. */
+int vfs_stat(const char *path, ext2_stat_t *out);
 
 #endif

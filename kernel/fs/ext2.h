@@ -26,8 +26,10 @@ int64_t ext2_read(ext2_fs_t *fs, uint32_t ino, uint64_t off, void *buf, uint32_t
 uint64_t ext2_file_size(ext2_fs_t *fs, uint32_t ino);
 
 /* List directory entries of `dir_ino` into `buf` as "name\n" lines.
-   Skips "." and "..".  Returns total bytes written (not including NUL). */
-uint32_t ext2_list_dir(ext2_fs_t *fs, uint32_t dir_ino, char *buf, uint32_t bufsz);
+   If flags bit 0 is set, includes "." and ".."; otherwise skips them.
+   Returns total bytes written (not including NUL). */
+uint32_t ext2_list_dir(ext2_fs_t *fs, uint32_t dir_ino,
+                       char *buf, uint32_t bufsz, uint32_t flags);
 
 /* Look up a path and return its inode number, or 0 on error.
    (Wraps ext2_lookup for callers that need the inode.) */
@@ -54,6 +56,18 @@ bool ext2_truncate(ext2_fs_t *fs, uint32_t ino);
 /* Read i_mode, i_uid, and i_gid from inode `ino`. Returns true on success. */
 bool ext2_inode_stat(ext2_fs_t *fs, uint32_t ino, uint16_t *out_mode,
                      uint32_t *out_uid, uint32_t *out_gid);
+
+/* Full file metadata for stat(). */
+typedef struct {
+    uint16_t mode;
+    uint16_t nlink;
+    uint32_t uid;
+    uint32_t gid;
+    uint32_t size;
+    uint32_t mtime;
+} ext2_stat_t;
+
+bool ext2_stat_full(ext2_fs_t *fs, uint32_t ino, ext2_stat_t *out);
 
 /* Set i_uid and i_gid on inode `ino`. Returns true on success. */
 bool ext2_inode_chown(ext2_fs_t *fs, uint32_t ino, uint32_t uid, uint32_t gid);

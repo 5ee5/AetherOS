@@ -178,12 +178,12 @@ uint64_t vfs_file_size(const char *path)
     return ext2_file_size(s_root_fs, ino);
 }
 
-uint32_t vfs_listdir(const char *path, char *buf, uint32_t bufsz)
+uint32_t vfs_listdir(const char *path, char *buf, uint32_t bufsz, uint32_t flags)
 {
     if (!s_root_fs) return 0;
     uint32_t ino;
     if (!ext2_lookup(s_root_fs, path, &ino)) return 0;
-    return ext2_list_dir(s_root_fs, ino, buf, bufsz);
+    return ext2_list_dir(s_root_fs, ino, buf, bufsz, flags);
 }
 
 int64_t vfs_write(int fd, const void *buf, uint32_t size)
@@ -308,4 +308,12 @@ int vfs_chmod(const char *path, uint16_t mode)
 {
     if (!s_root_fs) return -1;
     return ext2_chmod(s_root_fs, path, mode);
+}
+
+int vfs_stat(const char *path, ext2_stat_t *out)
+{
+    if (!s_root_fs || !out) return -1;
+    uint32_t ino;
+    if (!ext2_lookup(s_root_fs, path, &ino)) return -1;
+    return ext2_stat_full(s_root_fs, ino, out) ? 0 : -1;
 }

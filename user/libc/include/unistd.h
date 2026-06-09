@@ -14,6 +14,7 @@ pid_t    spawn(const char *path, char **argv);
 pid_t    spawn_as(const char *path, char **argv, uid_t uid, gid_t gid);
 pid_t    waitpid(pid_t pid, int *status, int options);
 long     listdir(const char *path, char *buf, long bufsz);
+long     listdir_all(const char *path, char *buf, long bufsz);
 int      pipe(int pipefd[2]);
 
 uid_t    getuid(void);

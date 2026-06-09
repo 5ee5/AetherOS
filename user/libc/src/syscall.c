@@ -1,5 +1,6 @@
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <stdlib.h>
 
@@ -107,6 +108,16 @@ int pipe(int pipefd[2])
 long listdir(const char *path, char *buf, long bufsz)
 {
     return __sc3(600, (long)path, (long)buf, bufsz);
+}
+
+long listdir_all(const char *path, char *buf, long bufsz)
+{
+    return __sc4(600, (long)path, (long)buf, bufsz, 1L);
+}
+
+int stat(const char *path, struct stat *buf)
+{
+    return (int)__sc2(4, (long)path, (long)buf);
 }
 
 int creat(const char *path)
