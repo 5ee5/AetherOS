@@ -22,7 +22,8 @@ static int move_into_dir(const char *src, const char *dst_dir)
     }
     memcpy(full_dst, dst_dir, (size_t)dlen);
     if (full_dst[dlen - 1] != '/') full_dst[dlen++] = '/';
-    strcpy(full_dst + dlen, name);
+    strncpy(full_dst + dlen, name, sizeof(full_dst) - (size_t)dlen - 1);
+    full_dst[sizeof(full_dst) - 1] = '\0';
     if (rename(src, full_dst) < 0) {
         printf("mv: cannot move '%s' to '%s'\n", src, full_dst);
         return 1;

@@ -1047,6 +1047,10 @@ bool ext2_rename(ext2_fs_t *fs, const char *old_path, const char *new_path)
     uint32_t src_ino = ext2_lookup_ino(fs, old_path);
     if (!src_ino) return false;
 
+    /* Rename onto self is always a no-op. */
+    uint32_t early_dst = ext2_lookup_ino(fs, new_path);
+    if (early_dst && early_dst == src_ino) return true;
+
     char src_parent[256], src_name[256];
     char dst_parent[256], dst_name[256];
     if (!path_split(old_path, src_parent, src_name)) return false;

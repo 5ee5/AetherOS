@@ -57,4 +57,26 @@ void test_vfs_run(void)
     /* Open a non-existent file must return negative. */
     int bad = vfs_open("/no_such_file.txt");
     KTEST_ASSERT(bad < 0);
+
+    /* vfs_creat creates a file; vfs_unlink removes it. */
+    int cr = vfs_creat("/ktest_tmp.txt");
+    KTEST_ASSERT(cr == 0);
+    KTEST_ASSERT(vfs_file_size("/ktest_tmp.txt") != UINT64_MAX);
+    vfs_unlink("/ktest_tmp.txt");
+    KTEST_ASSERT(vfs_file_size("/ktest_tmp.txt") == UINT64_MAX);
+
+    /* vfs_rename moves a file; old path disappears, new path appears. */
+    vfs_creat("/ktest_rename_src.txt");
+    KTEST_ASSERT(vfs_file_size("/ktest_rename_src.txt") != UINT64_MAX);
+    int rv = vfs_rename("/ktest_rename_src.txt", "/ktest_rename_dst.txt");
+    KTEST_ASSERT(rv == 0);
+    KTEST_ASSERT(vfs_file_size("/ktest_rename_src.txt") == UINT64_MAX);
+    KTEST_ASSERT(vfs_file_size("/ktest_rename_dst.txt") != UINT64_MAX);
+
+    /* Self-rename must be a no-op — file must survive. */
+    rv = vfs_rename("/ktest_rename_dst.txt", "/ktest_rename_dst.txt");
+    KTEST_ASSERT(rv == 0);
+    KTEST_ASSERT(vfs_file_size("/ktest_rename_dst.txt") != UINT64_MAX);
+
+    vfs_unlink("/ktest_rename_dst.txt");
 }
