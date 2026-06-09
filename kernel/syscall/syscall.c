@@ -343,7 +343,17 @@ static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
                          int64_t stdin_fd_parent, int64_t stdout_fd_parent)
 {
     if (path_virt >= 0x800000000000ULL) return -14;
-    const char *path = (const char *)(uintptr_t)path_virt;
+
+    /* Copy path from user space into a kernel buffer immediately, before any
+       CR3 switches, so the string remains accessible throughout this function. */
+    char kern_path[512];
+    {
+        const char *up = (const char *)(uintptr_t)path_virt;
+        uint32_t i = 0;
+        while (i < sizeof(kern_path) - 1U && up[i]) { kern_path[i] = up[i]; i++; }
+        kern_path[i] = '\0';
+    }
+    const char *path = kern_path;
 
     /* Check execute permission before loading. */
     {
