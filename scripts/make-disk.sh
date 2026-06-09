@@ -32,11 +32,11 @@ if [ -f build/shell.elf ]; then
     debugfs -w "$IMG?offset=${PART_OFFSET}" \
         -R "write build/shell.elf bin/shell" 2>/dev/null
 fi
-for prog in ls cat wc uname pwd mkdir rm cp wget grep touch head tail sort find login whoami id passwd useradd sudo poweroff reboot; do
-    if [ -f "build/bin/${prog}.elf" ]; then
-        debugfs -w "$IMG?offset=${PART_OFFSET}" \
-            -R "write build/bin/${prog}.elf bin/${prog}" 2>/dev/null
-    fi
+for elf in build/bin/*.elf; do
+    [ -f "$elf" ] || continue
+    prog=$(basename "$elf" .elf)
+    debugfs -w "$IMG?offset=${PART_OFFSET}" \
+        -R "write $elf bin/${prog}" 2>/dev/null
 done
 # Set setuid bit on sudo (0104755 = regular + setuid + rwxr-xr-x)
 if [ -f "build/bin/sudo.elf" ]; then
