@@ -46,6 +46,14 @@ syscall_entry:
     push r13
     push r14
     push r15
+    ; Save syscall arg registers so we can restore them on return (matching
+    ; Linux behaviour: all registers except RAX, RCX, R11 survive a syscall).
+    push rdi                 ; user a0
+    push rsi                 ; user a1
+    push rdx                 ; user a2
+    push r10                 ; user a3
+    push r8                  ; user a4
+    push r9                  ; user a5
 
     ; Build syscall_dispatch args:
     ;   rdi = nr (user rax)
@@ -70,6 +78,14 @@ syscall_entry:
     call syscall_dispatch
 
     cli
+
+    ; Restore syscall arg registers (user values before the syscall).
+    pop  r9
+    pop  r8
+    pop  r10
+    pop  rdx
+    pop  rsi
+    pop  rdi
 
     pop  r15
     pop  r14
