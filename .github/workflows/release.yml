@@ -20,20 +20,27 @@ jobs:
         run: |
           LATEST=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+(\.[0-9]+)?$' | head -1)
 
-          # Collect commit subjects only (first line) since last tag for bump detection
+          # Commit subjects (first line) and full bodies since the last tag.
           if [ -n "$LATEST" ]; then
             SUBJECTS=$(git log --format="%s" "${LATEST}..HEAD")
+            BODIES=$(git log --format="%B" "${LATEST}..HEAD")
           else
             SUBJECTS=$(git log --format="%s")
+            BODIES=$(git log --format="%B")
           fi
 
-          # Detect bump level: [major] or [minor] must appear as a standalone token
-          # in a commit subject (surrounded by space/start/end of line)
+          # Detect bump level. Precedence: major > minor > patch.
+          #   major: [major] token, a "type!:" Conventional-Commit bang, or a
+          #          "BREAKING CHANGE" footer.
+          #   minor: [minor] token, or a "feat:" / "feat(scope):" commit.
+          #   patch: anything else (the default).
+          # Explicit [minor]/[major] tokens always override the inferred level.
           BUMP="patch"
-          if echo "$SUBJECTS" | grep -qE '(^| )\[major\]( |$)'; then
-            BUMP="major"
-          elif echo "$SUBJECTS" | grep -qE '(^| )\[minor\]( |$)'; then
-            BUMP="minor"
+          if   echo "$SUBJECTS" | grep -qE '(^| )\[major\]( |$)'; then BUMP="major"
+          elif echo "$SUBJECTS" | grep -qE '(^| )\[minor\]( |$)'; then BUMP="minor"
+          elif echo "$SUBJECTS" | grep -qE '^[a-z]+(\([^)]+\))?!:' \
+               || echo "$BODIES" | grep -qE '^BREAKING CHANGE:'; then BUMP="major"
+          elif echo "$SUBJECTS" | grep -qE '^feat(\([^)]+\))?:'; then BUMP="minor"
           fi
           echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
 
@@ -59,6 +66,14 @@ jobs:
           echo "tag=$NEXT" >> "$GITHUB_OUTPUT"
           echo "prev=$LATEST" >> "$GITHUB_OUTPUT"
           echo "Bump level: $BUMP — next release: $NEXT"
+
+          # Guard: never clobber an existing tag. If the computed tag already
+          # exists, a previous run left state behind — fail loudly instead of
+          # silently producing a broken or duplicate release.
+          if git rev-parse -q --verify "refs/tags/$NEXT" >/dev/null; then
+            echo "::error::Computed tag $NEXT already exists — aborting to avoid clobbering it."
+            exit 1
+          fi
 
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y build-essential nasm binutils xorriso mtools
