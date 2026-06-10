@@ -79,6 +79,7 @@ KERNEL_C_SRCS := \
 	kernel/test/test_sched.c \
 	kernel/test/test_userspace.c \
 	kernel/test/test_vfs.c \
+	kernel/test/test_cred.c \
 	kernel/test/tests.c
 
 KERNEL_ASM_SRCS := \

@@ -21,6 +21,8 @@ uid_t    getuid(void);
 gid_t    getgid(void);
 int      setuid(uid_t uid);
 int      setgid(gid_t gid);
+int      seteuid(uid_t uid);
+int      setegid(gid_t gid);
 int      chown(const char *path, uid_t uid, gid_t gid);
 int      chmod(const char *path, int mode);
 

@@ -94,6 +94,8 @@ void syscall_init(void)
 #define SYS_RENAME    82U
 #define SYS_SPAWN    500U
 #define SYS_SPAWN_AS 501U
+#define SYS_SETEUID  502U
+#define SYS_SETEGID  503U
 #define SYS_LISTDIR  600U
 #define SYS_CREAT    601U
 #define SYS_DNS      602U
@@ -518,6 +520,11 @@ static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
         }
     }
 
+    /* Saved set-ids reflect the effective ids at exec time, so a privileged
+       program can drop to its real uid and later restore via seteuid. */
+    proc->cred.suid = proc->cred.euid;
+    proc->cred.sgid = proc->cred.egid;
+
     /* Inherit pipe ends from parent into child at fd 0 (stdin) / fd 1 (stdout). */
     fd_table_t *parent_fds = current_fds();
     if (parent_fds) {
@@ -550,22 +557,30 @@ static int64_t sys_chown(uint64_t path_virt, uint64_t uid, uint64_t gid)
 
 static int64_t sys_setuid(uint64_t uid)
 {
-    struct thread *t = sched_current();
-    struct process *p = t ? (struct process *)t->process : NULL;
+    struct process *p = sched_current_process();
     if (!p) return -1;
-    if (p->cred.euid != 0 && p->cred.uid != (uint32_t)uid) return -1; /* EPERM */
-    p->cred.uid = p->cred.euid = (uint32_t)uid;
-    return 0;
+    return cred_setuid(&p->cred, (uint32_t)uid) ? 0 : -1; /* EPERM */
 }
 
 static int64_t sys_setgid(uint64_t gid)
 {
-    struct thread *t = sched_current();
-    struct process *p = t ? (struct process *)t->process : NULL;
+    struct process *p = sched_current_process();
     if (!p) return -1;
-    if (p->cred.egid != 0 && p->cred.gid != (uint32_t)gid) return -1;
-    p->cred.gid = p->cred.egid = (uint32_t)gid;
-    return 0;
+    return cred_setgid(&p->cred, (uint32_t)gid) ? 0 : -1;
+}
+
+static int64_t sys_seteuid(uint64_t uid)
+{
+    struct process *p = sched_current_process();
+    if (!p) return -1;
+    return cred_seteuid(&p->cred, (uint32_t)uid) ? 0 : -1;
+}
+
+static int64_t sys_setegid(uint64_t gid)
+{
+    struct process *p = sched_current_process();
+    if (!p) return -1;
+    return cred_setegid(&p->cred, (uint32_t)gid) ? 0 : -1;
 }
 
 /* sys_spawn_as: root-only; spawns child with specified uid/gid.
@@ -583,8 +598,8 @@ static int64_t sys_spawn_as(uint64_t path_virt, uint64_t argv_virt,
 
     struct process *child = process_find((uint32_t)pid);
     if (child) {
-        child->cred.uid  = child->cred.euid  = (uint32_t)child_uid;
-        child->cred.gid  = child->cred.egid  = (uint32_t)child_gid;
+        child->cred.uid = child->cred.euid = child->cred.suid = (uint32_t)child_uid;
+        child->cred.gid = child->cred.egid = child->cred.sgid = (uint32_t)child_gid;
     }
     return pid;
 }
@@ -797,6 +812,8 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_CHOWN:     return sys_chown(a0, a1, a2);
     case SYS_SETUID:    return sys_setuid(a0);
     case SYS_SETGID:    return sys_setgid(a0);
+    case SYS_SETEUID:   return sys_seteuid(a0);
+    case SYS_SETEGID:   return sys_setegid(a0);
     case SYS_PIPE:      return sys_pipe(a0);
     case SYS_SPAWN:     return sys_spawn(a0, a1, (int64_t)a2, (int64_t)a3);
     case SYS_SPAWN_AS:  return sys_spawn_as(a0, a1, a2, a3);

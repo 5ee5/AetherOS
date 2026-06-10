@@ -24,6 +24,19 @@ struct process *process_find(uint32_t pid)
     return NULL;
 }
 
+/* Allocate a pid not currently in use. next_pid advances monotonically but
+   wraps and skips live pids, so freed pids are eventually reused instead of
+   leaking the id space. Bounded: at most MAX_PROCS are live. */
+static uint32_t alloc_pid(void)
+{
+    for (int i = 0; i < 2 * MAX_PROCS + 2; ++i) {
+        uint32_t cand = next_pid++;
+        if (next_pid == 0) next_pid = 1;          /* skip 0 on wrap */
+        if (cand != 0 && !process_find(cand)) return cand;
+    }
+    return next_pid++; /* unreachable in practice (only MAX_PROCS live) */
+}
+
 /* Free an exited process's struct and release its table slot. Caller must
    have already collected exit_status (e.g. from sys_waitpid). The associated
    thread struct is freed independently by the scheduler's deferred reaper. */
@@ -44,7 +57,7 @@ struct process *process_create_from_result(const elf_load_result_t *r)
         return NULL;
     }
 
-    proc->pid         = next_pid++;
+    proc->pid         = alloc_pid();
     proc->cr3         = r->cr3;
     proc->exited      = false;
     proc->exit_status = 0;
