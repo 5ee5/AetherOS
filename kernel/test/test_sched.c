@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "arch/x86_64/io.h"
+#include "mem/heap.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
 #include "sync/mutex.h"
@@ -51,6 +52,33 @@ static void yield_thread(void *arg)
 		__sync_add_and_fetch(&yield_counter, 1U);
 		thread_yield();
 	}
+	thread_exit();
+}
+
+/* ---- Heap concurrency stress (Phase 2 IRQ-safe heap lock) -------------- */
+
+#define HEAP_STRESS_THREADS 4
+#define HEAP_STRESS_ITERS   200
+
+static volatile uint32_t heap_stress_done;
+static volatile uint32_t heap_stress_bad;
+
+static void heap_stress_thread(void *arg)
+{
+	(void)arg;
+	for (uint32_t i = 0; i < HEAP_STRESS_ITERS; ++i) {
+		uint8_t *a = (uint8_t *)kmalloc(64);
+		uint8_t *b = (uint8_t *)kmalloc(256);
+		if (!a || !b) {
+			__sync_add_and_fetch(&heap_stress_bad, 1U);
+		} else {
+			a[0] = 0xAA; a[63] = 0x55;   /* touch to catch overlap */
+		}
+		kfree(a);
+		kfree(b);
+		thread_yield();
+	}
+	__sync_add_and_fetch(&heap_stress_done, 1U);
 	thread_exit();
 }
 
@@ -103,4 +131,23 @@ void test_sched_run(void)
 	}
 	__asm__ volatile("cli" ::: "memory");
 	KTEST_ASSERT(yield_counter == 10U);
+
+	/* --- Heap concurrency stress ---
+	   Several threads hammer kmalloc/kfree while the timer ISR's deferred
+	   reaper also calls kfree. If the heap lock weren't IRQ-safe, a thread
+	   preempted mid-allocation would deadlock the ISR on the same CPU and
+	   this loop would hang (smoke test timeout). */
+	heap_stress_done = 0;
+	heap_stress_bad  = 0;
+
+	__asm__ volatile("sti" ::: "memory");
+	for (uint32_t i = 0; i < HEAP_STRESS_THREADS; ++i) {
+		thread_create(heap_stress_thread, NULL);
+	}
+	while (heap_stress_done < HEAP_STRESS_THREADS) {
+		thread_yield();
+	}
+	__asm__ volatile("cli" ::: "memory");
+	KTEST_ASSERT(heap_stress_done == HEAP_STRESS_THREADS);
+	KTEST_ASSERT(heap_stress_bad == 0U);
 }

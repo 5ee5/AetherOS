@@ -5,6 +5,10 @@
 
 #include "core/panic.h"
 #include "core/serial.h"
+#include "sync/spinlock.h"
+
+/* IRQ-safe: reached from the heap's expand() which can run in the timer ISR. */
+static spinlock_t pmm_lock = SPINLOCK_INIT;
 
 #define PMM_MAX_PHYS_BYTES OS_EARLY_DIRECT_MAP_SIZE
 #define PMM_MAX_PAGES (PMM_MAX_PHYS_BYTES / OS_PAGE_SIZE)
@@ -113,6 +117,7 @@ void pmm_init(const struct os_boot_info *boot_info)
 
 uint64_t pmm_alloc_page(void)
 {
+	uint64_t flags = spinlock_acquire_irqsave(&pmm_lock);
 	for (uint64_t word = 0; word < PMM_BITMAP_WORDS; ++word) {
 		if (pmm_bitmap[word] == UINT64_MAX) {
 			continue;
@@ -121,8 +126,10 @@ uint64_t pmm_alloc_page(void)
 		uint64_t page = word * BITMAP_WORD_BITS + bit;
 		pmm_bitmap[word] |= 1ULL << bit;
 		--pmm_free;
+		spinlock_release_irqrestore(&pmm_lock, flags);
 		return page * OS_PAGE_SIZE;
 	}
+	spinlock_release_irqrestore(&pmm_lock, flags);
 	return PMM_ALLOC_FAILED;
 }
 
@@ -134,11 +141,14 @@ void pmm_free_page(uint64_t physical_address)
 	}
 
 	uint64_t page = physical_address / OS_PAGE_SIZE;
+	uint64_t flags = spinlock_acquire_irqsave(&pmm_lock);
 	if (!bitmap_test(page)) {
+		spinlock_release_irqrestore(&pmm_lock, flags);
 		panic("double PMM free");
 	}
 	bitmap_clear(page);
 	++pmm_free;
+	spinlock_release_irqrestore(&pmm_lock, flags);
 }
 
 uint64_t pmm_total_pages(void)

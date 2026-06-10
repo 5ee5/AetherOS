@@ -8,6 +8,11 @@
 #include "mem/pmm.h"
 #include "mem/vmm.h"
 #include "os/bootinfo.h"
+#include "sync/spinlock.h"
+
+/* IRQ-safe: kfree() is reached from the timer ISR's deferred reaper, so a
+   thread preempted mid-allocation must not deadlock the ISR on the same CPU. */
+static spinlock_t heap_lock = SPINLOCK_INIT;
 
 /* First virtual page of the kernel heap — well above the 64 GiB direct map. */
 #define HEAP_VIRT_BASE 0xffff900000000000ULL
@@ -111,12 +116,9 @@ void heap_init(void)
 	serial_write("\n");
 }
 
-void *kmalloc(uint64_t size)
+/* Core allocator; caller must hold heap_lock. */
+static void *kmalloc_locked(uint64_t size)
 {
-	if (size == 0) {
-		return NULL;
-	}
-
 	size = (size + 15U) & ~15ULL;  /* 16-byte alignment */
 	uint64_t total = size + sizeof(struct block);
 
@@ -169,12 +171,20 @@ void *kmalloc(uint64_t size)
 	return (void *)((char *)b + sizeof(struct block));
 }
 
-void kfree(void *ptr)
+void *kmalloc(uint64_t size)
 {
-	if (!ptr) {
-		return;
+	if (size == 0) {
+		return NULL;
 	}
+	uint64_t flags = spinlock_acquire_irqsave(&heap_lock);
+	void *p = kmalloc_locked(size);
+	spinlock_release_irqrestore(&heap_lock, flags);
+	return p;
+}
 
+/* Core free; caller must hold heap_lock. */
+static void kfree_locked(void *ptr)
+{
 	struct block *b = (struct block *)((char *)ptr - sizeof(struct block));
 	if (b->magic != HEAP_MAGIC || b->flags != BLOCK_USED) {
 		panic("heap: invalid free");
@@ -211,4 +221,14 @@ void kfree(void *ptr)
 	}
 
 	free_list_add(b);
+}
+
+void kfree(void *ptr)
+{
+	if (!ptr) {
+		return;
+	}
+	uint64_t flags = spinlock_acquire_irqsave(&heap_lock);
+	kfree_locked(ptr);
+	spinlock_release_irqrestore(&heap_lock, flags);
 }

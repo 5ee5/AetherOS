@@ -13,6 +13,24 @@
 #include "mem/heap.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
+
+/* One global FS lock. ext2 shares a single `scratch` buffer and s_files[] is a
+   global table, so all VFS entry points must serialize — user threads can run
+   concurrently on multiple CPUs. The cleanup-attribute guard releases on every
+   return path. No VFS function calls another, so the non-recursive lock is safe. */
+static spinlock_t vfs_lock = SPINLOCK_INIT;
+
+static inline void vfs_unlock_cleanup(int *held)
+{
+    (void)held;
+    spinlock_release(&vfs_lock);
+}
+
+#define VFS_LOCK()                                                      \
+    spinlock_acquire(&vfs_lock);                                        \
+    int __vfs_guard __attribute__((cleanup(vfs_unlock_cleanup))) = 1;   \
+    (void)__vfs_guard
 
 /* ---- AHCI-backed block device -------------------------------------------- */
 
@@ -196,6 +214,7 @@ static const char *vfs_resolve(const char *path, char *out, uint32_t outsz)
 
 int vfs_open(const char *path)
 {
+    VFS_LOCK();
     if (!s_root_fs) return -1;
     char abuf[512];
     path = vfs_resolve(path, abuf, sizeof(abuf));
@@ -216,6 +235,7 @@ int vfs_open(const char *path)
 
 int64_t vfs_read(int fd, void *buf, uint32_t size)
 {
+    VFS_LOCK();
     if (fd < 0 || fd >= VFS_MAX_OPEN || !s_files[fd].in_use) return -1;
     vfs_file_t *f = &s_files[fd];
     int64_t n = ext2_read(s_root_fs, f->inode, f->offset, buf, size);
@@ -225,12 +245,14 @@ int64_t vfs_read(int fd, void *buf, uint32_t size)
 
 void vfs_close(int fd)
 {
+    VFS_LOCK();
     if (fd < 0 || fd >= VFS_MAX_OPEN) return;
     s_files[fd].in_use = false;
 }
 
 uint64_t vfs_file_size(const char *path)
 {
+    VFS_LOCK();
     if (!s_root_fs) return UINT64_MAX;
     char abuf[512];
     path = vfs_resolve(path, abuf, sizeof(abuf));
@@ -241,6 +263,7 @@ uint64_t vfs_file_size(const char *path)
 
 uint32_t vfs_listdir(const char *path, char *buf, uint32_t bufsz, uint32_t flags)
 {
+    VFS_LOCK();
     if (!s_root_fs) return 0;
     char abuf[512];
     path = vfs_resolve(path, abuf, sizeof(abuf));
@@ -251,6 +274,7 @@ uint32_t vfs_listdir(const char *path, char *buf, uint32_t bufsz, uint32_t flags
 
 int64_t vfs_write(int fd, const void *buf, uint32_t size)
 {
+    VFS_LOCK();
     if (fd < 0 || fd >= VFS_MAX_OPEN || !s_files[fd].in_use) return -1;
     vfs_file_t *f = &s_files[fd];
     int64_t n = ext2_write(s_root_fs, f->inode, f->offset, buf, size);
@@ -260,6 +284,7 @@ int64_t vfs_write(int fd, const void *buf, uint32_t size)
 
 int vfs_open_ex(const char *path, int flags)
 {
+    VFS_LOCK();
     if (!s_root_fs) return -1;
     char abuf[512];
     path = vfs_resolve(path, abuf, sizeof(abuf));
@@ -291,6 +316,7 @@ int vfs_open_ex(const char *path, int flags)
 
 int vfs_creat(const char *path)
 {
+    VFS_LOCK();
     if (!s_root_fs) return -1;
     char abuf[512];
     path = vfs_resolve(path, abuf, sizeof(abuf));
@@ -302,6 +328,7 @@ int vfs_creat(const char *path)
 
 int vfs_mkdir(const char *path)
 {
+    VFS_LOCK();
     if (!s_root_fs) return -1;
     char abuf[512];
     path = vfs_resolve(path, abuf, sizeof(abuf));
@@ -313,6 +340,7 @@ int vfs_mkdir(const char *path)
 
 int vfs_unlink(const char *path)
 {
+    VFS_LOCK();
     if (!s_root_fs) return -1;
     char abuf[512];
     path = vfs_resolve(path, abuf, sizeof(abuf));
@@ -323,6 +351,7 @@ int vfs_unlink(const char *path)
 
 int vfs_chdir(const char *path)
 {
+    VFS_LOCK();
     if (!s_root_fs || !path) return -1;
 
     /* Resolve to a normalized absolute path, then verify it exists. */
@@ -340,6 +369,7 @@ int vfs_chdir(const char *path)
 
 int vfs_getcwd(char *buf, uint32_t size)
 {
+    VFS_LOCK();
     if (!buf || size == 0) return -1;
     struct process *proc = sched_current_process();
     const char *cwd = proc ? proc->cwd : s_kernel_cwd;
@@ -350,6 +380,7 @@ int vfs_getcwd(char *buf, uint32_t size)
 
 int vfs_file_stat(const char *path, uint16_t *out_mode, uint32_t *out_uid, uint32_t *out_gid)
 {
+    VFS_LOCK();
     if (!s_root_fs) return -1;
     char abuf[512];
     path = vfs_resolve(path, abuf, sizeof(abuf));
@@ -360,6 +391,7 @@ int vfs_file_stat(const char *path, uint16_t *out_mode, uint32_t *out_uid, uint3
 
 int vfs_chown(const char *path, uint32_t uid, uint32_t gid)
 {
+    VFS_LOCK();
     if (!s_root_fs) return -1;
     char abuf[512];
     path = vfs_resolve(path, abuf, sizeof(abuf));
@@ -370,6 +402,7 @@ int vfs_chown(const char *path, uint32_t uid, uint32_t gid)
 
 int vfs_chmod(const char *path, uint16_t mode)
 {
+    VFS_LOCK();
     if (!s_root_fs) return -1;
     char abuf[512];
     path = vfs_resolve(path, abuf, sizeof(abuf));
@@ -378,6 +411,7 @@ int vfs_chmod(const char *path, uint16_t mode)
 
 int vfs_stat(const char *path, ext2_stat_t *out)
 {
+    VFS_LOCK();
     if (!s_root_fs || !out) return -1;
     char abuf[512];
     path = vfs_resolve(path, abuf, sizeof(abuf));
@@ -388,6 +422,7 @@ int vfs_stat(const char *path, ext2_stat_t *out)
 
 int vfs_rename(const char *old_path, const char *new_path)
 {
+    VFS_LOCK();
     if (!s_root_fs) return -1;
     char oldbuf[512], newbuf[512];
     vfs_resolve(old_path, oldbuf, sizeof(oldbuf));
@@ -397,5 +432,6 @@ int vfs_rename(const char *old_path, const char *new_path)
 
 void vfs_disk_stats(uint64_t *total_bytes, uint64_t *free_bytes)
 {
+    VFS_LOCK();
     ext2_disk_stats(s_root_fs, total_bytes, free_bytes);
 }
