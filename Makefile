@@ -145,13 +145,14 @@ $(BUILD_DIR)/kernel/arch/x86_64/smp_trampoline_blob.o: \
 	@mkdir -p $(@D)
 	$(NASM) -f elf64 $< -o $@
 
-# User-mode hello binary: assemble + link at 0x400000
-$(BUILD_DIR)/hello.o: user/hello/hello.asm
+# User-mode hello binary: compile C + link with tinylibc at 0x400000
+$(BUILD_DIR)/hello.o: user/hello/hello.c
 	@mkdir -p $(@D)
-	$(NASM) -f elf64 -o $@ $<
+	$(CC) $(USER_CFLAGS) -c $< -o $@
 
-$(HELLO_ELF): $(BUILD_DIR)/hello.o
-	$(LD) -m elf_x86_64 -Ttext=0x400000 -e _start --build-id=none -o $@ $<
+$(HELLO_ELF): $(BUILD_DIR)/hello.o $(LIBC_A) $(LIBC_CRT0)
+	$(LD) -m elf_x86_64 -Ttext=0x400000 -e _start --build-id=none \
+	    $(LIBC_CRT0) $(BUILD_DIR)/hello.o $(LIBC_A) -o $@
 
 # The blob object depends on the ELF binary
 $(BUILD_DIR)/user/hello/hello_blob.o: \
@@ -159,13 +160,14 @@ $(BUILD_DIR)/user/hello/hello_blob.o: \
 	@mkdir -p $(@D)
 	$(NASM) -f elf64 $< -o $@
 
-# Shell binary: assemble + link at 0x400000
-$(BUILD_DIR)/shell.o: user/shell/shell.asm
+# Shell binary: compile C + link with tinylibc at 0x400000
+$(BUILD_DIR)/shell.o: user/shell/shell.c
 	@mkdir -p $(@D)
-	$(NASM) -f elf64 -o $@ $<
+	$(CC) $(USER_CFLAGS) -c $< -o $@
 
-$(SHELL_ELF): $(BUILD_DIR)/shell.o
-	$(LD) -m elf_x86_64 -Ttext=0x400000 -e _start --build-id=none -o $@ $<
+$(SHELL_ELF): $(BUILD_DIR)/shell.o $(LIBC_A) $(LIBC_CRT0)
+	$(LD) -m elf_x86_64 -Ttext=0x400000 -e _start --build-id=none \
+	    $(LIBC_CRT0) $(BUILD_DIR)/shell.o $(LIBC_A) -o $@
 
 $(BUILD_DIR)/user/shell/shell_blob.o: \
 	user/shell/shell_blob.asm $(SHELL_ELF)

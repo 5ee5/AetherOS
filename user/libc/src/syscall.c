@@ -97,6 +97,13 @@ pid_t spawn(const char *path, char **argv)
     return (pid_t)__sc4(500, (long)path, (long)argv, -1L, -1L);
 }
 
+pid_t spawn_io(const char *path, char **argv, int in_fd, int out_fd)
+{
+    /* Like spawn(), but the child inherits in_fd as stdin and out_fd as stdout
+       (used to wire pipeline stages). Pass -1 to keep the default tty. */
+    return (pid_t)__sc4(500, (long)path, (long)argv, (long)in_fd, (long)out_fd);
+}
+
 pid_t spawn_as(const char *path, char **argv, uid_t uid, gid_t gid)
 {
     return (pid_t)__sc4(501, (long)path, (long)argv, (long)uid, (long)gid);
