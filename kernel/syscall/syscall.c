@@ -10,6 +10,7 @@
 #include "lib/string.h"
 #include "mem/heap.h"
 #include "mem/pmm.h"
+#include "mem/uaccess.h"
 #include "mem/vmm.h"
 #include "net/dns.h"
 #include "net/socket.h"
@@ -102,45 +103,75 @@ void syscall_init(void)
 
 static fd_table_t *current_fds(void);
 
+/* Write sink resolution. */
+enum write_sink { SINK_BAD, SINK_SERIAL, SINK_PIPE, SINK_SOCKET, SINK_FILE };
+
 static int64_t sys_write(uint64_t fd, uint64_t buf_virt, uint64_t count)
 {
-    if (buf_virt + count < buf_virt || buf_virt + count > 0x800000000000ULL)
-        return -14; /* -EFAULT */
-    const char *p = (const char *)(uintptr_t)buf_virt;
-
-    if (fd == 1U || fd == 2U) {
-        /* Check if stdout is redirected to a pipe in this process. */
-        if (fd == 1U) {
-            fd_table_t *fds = current_fds();
-            if (fds && fd_type(fds, 1) == FD_PIPE_WRITE) {
-                int pidx = fd_id(fds, 1);
-                uint32_t written = 0;
-                while (written < count) {
-                    int n = pipe_write(pidx, p + written, (uint32_t)(count - written));
-                    if (n < 0) return (int64_t)written;
-                    written += (uint32_t)n;
-                    if (written < count)
-                        __asm__ volatile("int $0x20" ::: "memory"); /* yield if buffer full */
-                }
-                return (int64_t)count;
-            }
-        }
-        for (uint64_t i = 0; i < count; ++i) serial_write_char(p[i]);
-        return (int64_t)count;
-    }
+    if (!user_range_ok(buf_virt, count)) return -14; /* -EFAULT */
 
     fd_table_t *fds = current_fds();
-    if (!fds) return -9;
 
-    fd_type_t type = fd_type(fds, (int)fd);
-    if (type == FD_SOCKET) {
-        int idx = fd_id(fds, (int)fd);
-        return (int64_t)sock_send(idx, p, (uint32_t)count);
+    /* Resolve the destination once, then stream user data through a kernel
+       bounce buffer so no sink ever dereferences user memory directly (which
+       would fault the kernel — and the pipe sink holds a lock while writing). */
+    enum write_sink sink = SINK_BAD;
+    int idx = -1, vfd = -1;
+    if (fd == 1U || fd == 2U) {
+        if (fd == 1U && fds && fd_type(fds, 1) == FD_PIPE_WRITE) {
+            sink = SINK_PIPE; idx = fd_id(fds, 1);
+        } else {
+            sink = SINK_SERIAL;
+        }
+    } else if (!fds) {
+        return -9;
+    } else if (fd_type(fds, (int)fd) == FD_SOCKET) {
+        sink = SINK_SOCKET; idx = fd_id(fds, (int)fd);
+    } else {
+        vfd = fd_to_vfs(fds, (int)fd);
+        if (vfd < 0) return -9;
+        sink = SINK_FILE;
     }
 
-    int vfd = fd_to_vfs(fds, (int)fd);
-    if (vfd < 0) return -9;
-    return vfs_write(vfd, p, (uint32_t)count);
+    char kbuf[512];
+    uint64_t done = 0;
+    while (done < count) {
+        uint64_t chunk = count - done;
+        if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
+        if (!copy_from_user(kbuf, (const char *)(uintptr_t)buf_virt + done, chunk))
+            return done ? (int64_t)done : -14;
+
+        switch (sink) {
+        case SINK_SERIAL:
+            for (uint64_t i = 0; i < chunk; ++i) serial_write_char(kbuf[i]);
+            break;
+        case SINK_PIPE: {
+            uint32_t w = 0;
+            while (w < chunk) {
+                int n = pipe_write(idx, kbuf + w, (uint32_t)(chunk - w));
+                if (n < 0) return (done + w) ? (int64_t)(done + w) : 0;
+                w += (uint32_t)n;
+                if (w < chunk)
+                    __asm__ volatile("int $0x20" ::: "memory"); /* yield if full */
+            }
+            break;
+        }
+        case SINK_SOCKET: {
+            int n = sock_send(idx, kbuf, (uint32_t)chunk);
+            if (n < 0) return done ? (int64_t)done : -1;
+            break;
+        }
+        case SINK_FILE: {
+            int64_t n = vfs_write(vfd, kbuf, (uint32_t)chunk);
+            if (n < 0) return done ? (int64_t)done : n;
+            break;
+        }
+        default:
+            return -9;
+        }
+        done += chunk;
+    }
+    return (int64_t)count;
 }
 
 static fd_table_t *current_fds(void)
@@ -154,8 +185,9 @@ static fd_table_t *current_fds(void)
 static int64_t sys_open(uint64_t path_virt, uint64_t flags, uint64_t mode)
 {
     (void)mode;
-    if (path_virt >= 0x800000000000ULL) return -14; /* EFAULT */
-    const char *path = (const char *)(uintptr_t)path_virt;
+    char path[512];
+    if (strncpy_from_user(path, (const void *)(uintptr_t)path_virt, sizeof(path)) < 0)
+        return -14; /* EFAULT */
 
     /* Check read/write permission on existing files. */
     {
@@ -208,36 +240,59 @@ static int64_t sys_read_stdin(void *buf, uint32_t count)
 
 static int64_t sys_read(uint64_t fd, uint64_t buf_virt, uint64_t count)
 {
-    if (buf_virt + count < buf_virt || buf_virt + count > 0x800000000000ULL) return -14;
-    void *buf = (void *)(uintptr_t)buf_virt;
-    if (fd == 0) {
-        fd_table_t *fds = current_fds();
-        if (fds && fd_type(fds, 0) == FD_PIPE_READ) {
-            int pidx = fd_id(fds, 0);
-            int n;
-            while ((n = pipe_read(pidx, buf, (uint32_t)count)) == -2)
-                __asm__ volatile("int $0x20" ::: "memory");
-            return (n >= 0) ? (int64_t)n : -1;
-        }
-        return sys_read_stdin(buf, (uint32_t)count);
-    }
+    if (!user_range_ok(buf_virt, count)) return -14;
+    if (count == 0) return 0;
 
     fd_table_t *fds = current_fds();
-    if (!fds) return -9;
+    char kbuf[512];
 
-    fd_type_t type = fd_type(fds, (int)fd);
-    if (type == FD_SOCKET) {
-        int idx = fd_id(fds, (int)fd);
+    /* fd 0: stdin (tty) or a pipe redirected onto stdin. One chunk per call. */
+    if (fd == 0) {
+        uint32_t chunk = count > sizeof(kbuf) ? sizeof(kbuf) : (uint32_t)count;
         int n;
-        while ((n = sock_recv(idx, buf, (uint32_t)count)) == 0)
-            __asm__ volatile("int $0x20" ::: "memory");
-        if (n < 0) return 0; /* EOF */
-        return (int64_t)n;
+        if (fds && fd_type(fds, 0) == FD_PIPE_READ) {
+            int pidx = fd_id(fds, 0);
+            while ((n = pipe_read(pidx, kbuf, chunk)) == -2)
+                __asm__ volatile("int $0x20" ::: "memory");
+            if (n < 0) return -1;
+        } else {
+            n = (int)sys_read_stdin(kbuf, chunk);
+        }
+        if (n <= 0) return n;
+        if (!copy_to_user((void *)(uintptr_t)buf_virt, kbuf, (uint64_t)n)) return -14;
+        return n;
     }
 
+    if (!fds) return -9;
+    fd_type_t type = fd_type(fds, (int)fd);
+
+    /* Socket: block until data or EOF; return one chunk. */
+    if (type == FD_SOCKET) {
+        int idx = fd_id(fds, (int)fd);
+        uint32_t chunk = count > sizeof(kbuf) ? sizeof(kbuf) : (uint32_t)count;
+        int n;
+        while ((n = sock_recv(idx, kbuf, chunk)) == 0)
+            __asm__ volatile("int $0x20" ::: "memory");
+        if (n < 0) return 0; /* EOF */
+        if (!copy_to_user((void *)(uintptr_t)buf_virt, kbuf, (uint64_t)n)) return -14;
+        return n;
+    }
+
+    /* Regular file: fill up to count, streaming through the bounce buffer. */
     int vfd = fd_to_vfs(fds, (int)fd);
     if (vfd < 0) return -9;
-    return vfs_read(vfd, buf, (uint32_t)count);
+    uint64_t done = 0;
+    while (done < count) {
+        uint32_t chunk = (count - done) > sizeof(kbuf) ? (uint32_t)sizeof(kbuf)
+                                                       : (uint32_t)(count - done);
+        int64_t n = vfs_read(vfd, kbuf, chunk);
+        if (n <= 0) break;
+        if (!copy_to_user((void *)(uintptr_t)buf_virt + done, kbuf, (uint64_t)n))
+            return done ? (int64_t)done : -14;
+        done += (uint64_t)n;
+        if ((uint32_t)n < chunk) break; /* EOF / short read */
+    }
+    return (int64_t)done;
 }
 
 static int64_t sys_close(uint64_t fd)
@@ -331,8 +386,10 @@ static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
         t->state = THREAD_BLOCKED;
         __asm__ volatile("cli; int $0x20; sti" ::: "memory");
     }
-    if (status_virt && status_virt < 0x800000000000ULL)
-        *(int32_t *)(uintptr_t)status_virt = target->exit_status << 8;
+    if (status_virt) {
+        int32_t st = target->exit_status << 8;
+        copy_to_user((void *)(uintptr_t)status_virt, &st, sizeof(st)); /* best-effort */
+    }
     /* Parent has collected the status: free the zombie's struct and table slot. */
     process_reap(target);
     return (int64_t)pid;
@@ -344,17 +401,12 @@ static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
 static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
                          int64_t stdin_fd_parent, int64_t stdout_fd_parent)
 {
-    if (path_virt >= 0x800000000000ULL) return -14;
-
     /* Copy path from user space into a kernel buffer immediately, before any
        CR3 switches, so the string remains accessible throughout this function. */
     char kern_path[512];
-    {
-        const char *up = (const char *)(uintptr_t)path_virt;
-        uint32_t i = 0;
-        while (i < sizeof(kern_path) - 1U && up[i]) { kern_path[i] = up[i]; i++; }
-        kern_path[i] = '\0';
-    }
+    if (strncpy_from_user(kern_path, (const void *)(uintptr_t)path_virt,
+                          sizeof(kern_path)) < 0)
+        return -14;
     const char *path = kern_path;
 
     /* Check execute permission before loading. */
@@ -386,15 +438,16 @@ static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
     char arg_store[MAX_SPAWN_ARGS][MAX_ARG_LEN];
     int argc = 0;
     if (argv_virt && argv_virt < 0x800000000000ULL) {
-        uint64_t *argv = (uint64_t *)(uintptr_t)argv_virt;
         while (argc < MAX_SPAWN_ARGS) {
-            uint64_t p = argv[argc];
-            if (!p || p >= 0x800000000000ULL) break;
-            const char *src = (const char *)(uintptr_t)p;
-            uint32_t len = 0;
-            while (len < MAX_ARG_LEN - 1U && src[len]) len++;
-            memcpy(arg_store[argc], src, len);
-            arg_store[argc][len] = '\0';
+            uint64_t p = 0;
+            /* Read the argv[argc] pointer from user space. */
+            if (!copy_from_user(&p, (const void *)(uintptr_t)(argv_virt +
+                                (uint64_t)argc * sizeof(uint64_t)), sizeof(p)))
+                break;
+            if (!p) break;
+            if (strncpy_from_user(arg_store[argc], (const void *)(uintptr_t)p,
+                                  MAX_ARG_LEN) < 0)
+                break;
             argc++;
         }
     }
@@ -486,11 +539,13 @@ static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
 
 static int64_t sys_chown(uint64_t path_virt, uint64_t uid, uint64_t gid)
 {
-    if (path_virt >= 0x800000000000ULL) return -14;
+    char path[512];
+    if (strncpy_from_user(path, (const void *)(uintptr_t)path_virt, sizeof(path)) < 0)
+        return -14;
     struct thread *t = sched_current();
     struct process *p = t ? (struct process *)t->process : NULL;
     if (!p || p->cred.euid != 0) return -1; /* EPERM */
-    return vfs_chown((const char *)(uintptr_t)path_virt, (uint32_t)uid, (uint32_t)gid);
+    return vfs_chown(path, (uint32_t)uid, (uint32_t)gid);
 }
 
 static int64_t sys_setuid(uint64_t uid)
@@ -536,8 +591,7 @@ static int64_t sys_spawn_as(uint64_t path_virt, uint64_t argv_virt,
 
 static int64_t sys_pipe(uint64_t pipefd_virt)
 {
-    if (pipefd_virt >= 0x800000000000ULL) return -14;
-    int32_t *pipefd = (int32_t *)(uintptr_t)pipefd_virt;
+    if (!user_range_ok(pipefd_virt, 2 * sizeof(int32_t))) return -14;
     fd_table_t *fds = current_fds();
     if (!fds) return -9;
     int pidx = pipe_alloc();
@@ -546,74 +600,98 @@ static int64_t sys_pipe(uint64_t pipefd_virt)
     if (rfd < 0) { pipe_free(pidx); return -24; }
     int wfd = fd_alloc_pipe(fds, pidx, FD_PIPE_WRITE);
     if (wfd < 0) { fd_free(fds, rfd); pipe_free(pidx); return -24; }
-    pipefd[0] = rfd;
-    pipefd[1] = wfd;
+    int32_t pipefd[2] = { rfd, wfd };
+    if (!copy_to_user((void *)(uintptr_t)pipefd_virt, pipefd, sizeof(pipefd))) {
+        fd_free(fds, rfd); fd_free(fds, wfd); pipe_free(pidx);
+        return -14;
+    }
     return 0;
 }
 
 static int64_t sys_listdir(uint64_t path_virt, uint64_t buf_virt,
                            uint64_t bufsz, uint64_t flags)
 {
-    if (path_virt >= 0x800000000000ULL || buf_virt >= 0x800000000000ULL) return -14;
-    return (int64_t)vfs_listdir((const char *)(uintptr_t)path_virt,
-                                 (char *)(uintptr_t)buf_virt,
-                                 (uint32_t)bufsz, (uint32_t)flags);
+    char path[512];
+    if (strncpy_from_user(path, (const void *)(uintptr_t)path_virt, sizeof(path)) < 0)
+        return -14;
+    if (!user_range_ok(buf_virt, bufsz)) return -14;
+    if (bufsz == 0) return 0;
+    char *kbuf = (char *)kmalloc((uint32_t)bufsz);
+    if (!kbuf) return -12;
+    uint32_t n = vfs_listdir(path, kbuf, (uint32_t)bufsz, (uint32_t)flags);
+    bool ok = copy_to_user((void *)(uintptr_t)buf_virt, kbuf, n);
+    kfree(kbuf);
+    return ok ? (int64_t)n : -14;
 }
 
 static int64_t sys_stat(uint64_t path_virt, uint64_t buf_virt)
 {
-    if (path_virt >= 0x800000000000ULL || buf_virt >= 0x800000000000ULL) return -14;
-    const char *path = (const char *)(uintptr_t)path_virt;
+    char path[512];
+    if (strncpy_from_user(path, (const void *)(uintptr_t)path_virt, sizeof(path)) < 0)
+        return -14;
     /* Layout must match user-space struct stat in sys/stat.h */
-    struct {
+    struct stat_buf {
         uint16_t mode;
         uint16_t nlink;
         uint32_t uid;
         uint32_t gid;
         uint32_t size;
         uint32_t mtime;
-    } __attribute__((packed)) *ubuf = (void *)(uintptr_t)buf_virt;
+    } __attribute__((packed)) kbuf;
     ext2_stat_t st;
     if (vfs_stat(path, &st) < 0) return -2; /* ENOENT */
-    ubuf->mode  = st.mode;
-    ubuf->nlink = st.nlink;
-    ubuf->uid   = st.uid;
-    ubuf->gid   = st.gid;
-    ubuf->size  = st.size;
-    ubuf->mtime = st.mtime;
+    kbuf.mode  = st.mode;
+    kbuf.nlink = st.nlink;
+    kbuf.uid   = st.uid;
+    kbuf.gid   = st.gid;
+    kbuf.size  = st.size;
+    kbuf.mtime = st.mtime;
+    if (!copy_to_user((void *)(uintptr_t)buf_virt, &kbuf, sizeof(kbuf))) return -14;
     return 0;
 }
 
 static int64_t sys_creat(uint64_t path_virt)
 {
-    if (path_virt >= 0x800000000000ULL) return -14;
-    return vfs_creat((const char *)(uintptr_t)path_virt);
+    char path[512];
+    if (strncpy_from_user(path, (const void *)(uintptr_t)path_virt, sizeof(path)) < 0)
+        return -14;
+    return vfs_creat(path);
 }
 
 static int64_t sys_mkdir(uint64_t path_virt)
 {
-    if (path_virt >= 0x800000000000ULL) return -14;
-    return vfs_mkdir((const char *)(uintptr_t)path_virt);
+    char path[512];
+    if (strncpy_from_user(path, (const void *)(uintptr_t)path_virt, sizeof(path)) < 0)
+        return -14;
+    return vfs_mkdir(path);
 }
 
 static int64_t sys_unlink(uint64_t path_virt)
 {
-    if (path_virt >= 0x800000000000ULL) return -14;
-    return vfs_unlink((const char *)(uintptr_t)path_virt);
+    char path[512];
+    if (strncpy_from_user(path, (const void *)(uintptr_t)path_virt, sizeof(path)) < 0)
+        return -14;
+    return vfs_unlink(path);
 }
 
 static int64_t sys_chdir(uint64_t path_virt)
 {
-    if (path_virt >= 0x800000000000ULL) return -14;
-    return vfs_chdir((const char *)(uintptr_t)path_virt);
+    char path[512];
+    if (strncpy_from_user(path, (const void *)(uintptr_t)path_virt, sizeof(path)) < 0)
+        return -14;
+    return vfs_chdir(path);
 }
 
 static int64_t sys_getcwd(uint64_t buf_virt, uint64_t size)
 {
-    if (buf_virt >= 0x800000000000ULL) return -14;
-    if (vfs_getcwd((char *)(uintptr_t)buf_virt, (uint32_t)size) == 0)
-        return (int64_t)strlen((char *)(uintptr_t)buf_virt);
-    return -1;
+    char kbuf[256];
+    uint32_t cap = (size < sizeof(kbuf)) ? (uint32_t)size : (uint32_t)sizeof(kbuf);
+    if (cap == 0) return -1;
+    if (vfs_getcwd(kbuf, cap) != 0) return -1;
+    uint32_t len = (uint32_t)strlen(kbuf) + 1U; /* include NUL */
+    if (len > cap) len = cap;
+    if (!copy_to_user((void *)(uintptr_t)buf_virt, kbuf, len)) return -14;
+    return (int64_t)strlen(kbuf);
 }
 
 /* ---- Socket syscalls ------------------------------------------------------- */
@@ -639,47 +717,64 @@ static int64_t sys_connect(uint64_t fd, uint64_t addr_virt, uint64_t addrlen)
     if (fd_type(fds, (int)fd) != FD_SOCKET) return -9;
     int idx = fd_id(fds, (int)fd);
 
-    const struct sockaddr_in *sa = (const struct sockaddr_in *)(uintptr_t)addr_virt;
-    uint16_t port = (uint16_t)((sa->sin_port >> 8) | (sa->sin_port << 8)); /* ntohs */
-    return (int64_t)sock_connect(idx, sa->sin_addr, port);
+    struct sockaddr_in sa;
+    if (!copy_from_user(&sa, (const void *)(uintptr_t)addr_virt, sizeof(sa))) return -14;
+    uint16_t port = (uint16_t)((sa.sin_port >> 8) | (sa.sin_port << 8)); /* ntohs */
+    return (int64_t)sock_connect(idx, sa.sin_addr, port);
 }
 
 static int64_t sys_send(uint64_t fd, uint64_t buf_virt, uint64_t len, uint64_t flags)
 {
     (void)flags;
-    if (buf_virt + len < buf_virt || buf_virt + len > 0x800000000000ULL) return -14;
+    if (!user_range_ok(buf_virt, len)) return -14;
     fd_table_t *fds = current_fds();
     if (!fds) return -9;
     if (fd_type(fds, (int)fd) != FD_SOCKET) return -9;
     int idx = fd_id(fds, (int)fd);
-    return (int64_t)sock_send(idx, (const void *)(uintptr_t)buf_virt, (uint32_t)len);
+
+    char kbuf[512];
+    uint64_t done = 0;
+    while (done < len) {
+        uint32_t chunk = (len - done) > sizeof(kbuf) ? (uint32_t)sizeof(kbuf)
+                                                     : (uint32_t)(len - done);
+        if (!copy_from_user(kbuf, (const char *)(uintptr_t)buf_virt + done, chunk))
+            return done ? (int64_t)done : -14;
+        int n = sock_send(idx, kbuf, chunk);
+        if (n < 0) return done ? (int64_t)done : -1;
+        done += (uint32_t)n;
+        if ((uint32_t)n < chunk) break;
+    }
+    return (int64_t)done;
 }
 
 static int64_t sys_recv(uint64_t fd, uint64_t buf_virt, uint64_t len, uint64_t flags)
 {
     (void)flags;
-    if (buf_virt + len < buf_virt || buf_virt + len > 0x800000000000ULL) return -14;
+    if (!user_range_ok(buf_virt, len)) return -14;
+    if (len == 0) return 0;
     fd_table_t *fds = current_fds();
     if (!fds) return -9;
     if (fd_type(fds, (int)fd) != FD_SOCKET) return -9;
     int idx = fd_id(fds, (int)fd);
-    void *buf = (void *)(uintptr_t)buf_virt;
 
+    char kbuf[512];
+    uint32_t chunk = len > sizeof(kbuf) ? (uint32_t)sizeof(kbuf) : (uint32_t)len;
     int n;
-    while ((n = sock_recv(idx, buf, (uint32_t)len)) == 0)
+    while ((n = sock_recv(idx, kbuf, chunk)) == 0)
         __asm__ volatile("int $0x20" ::: "memory");
     if (n < 0) return 0; /* EOF */
+    if (!copy_to_user((void *)(uintptr_t)buf_virt, kbuf, (uint64_t)n)) return -14;
     return (int64_t)n;
 }
 
 static int64_t sys_dns(uint64_t host_virt, uint64_t ip_out_virt)
 {
-    if (host_virt >= 0x800000000000ULL || ip_out_virt >= 0x800000000000ULL) return -14;
-    const char *host = (const char *)(uintptr_t)host_virt;
-    uint32_t *ip_out = (uint32_t *)(uintptr_t)ip_out_virt;
+    char host[256];
+    if (strncpy_from_user(host, (const void *)(uintptr_t)host_virt, sizeof(host)) < 0)
+        return -14;
     uint32_t ip = 0;
     if (!dns_resolve(host, &ip)) return -1;
-    *ip_out = ip;
+    if (!copy_to_user((void *)(uintptr_t)ip_out_virt, &ip, sizeof(ip))) return -14;
     return 0;
 }
 
@@ -711,8 +806,11 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_MKDIR:   return sys_mkdir(a0);
     case SYS_UNLINK:  return sys_unlink(a0);
     case SYS_RENAME: {
-        if (a0 >= 0x800000000000ULL || a1 >= 0x800000000000ULL) return -14;
-        return vfs_rename((const char *)(uintptr_t)a0, (const char *)(uintptr_t)a1);
+        char oldp[512], newp[512];
+        if (strncpy_from_user(oldp, (const void *)(uintptr_t)a0, sizeof(oldp)) < 0 ||
+            strncpy_from_user(newp, (const void *)(uintptr_t)a1, sizeof(newp)) < 0)
+            return -14;
+        return vfs_rename(oldp, newp);
     }
     case SYS_CHDIR:   return sys_chdir(a0);
     case SYS_GETCWD:  return sys_getcwd(a0, a1);
@@ -722,13 +820,15 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_RECV:    return sys_recv(a0, a1, a2, a3);
     case SYS_DNS:     return sys_dns(a0, a1);
     case SYS_CHMOD: {
-        if (a0 >= 0x800000000000ULL) return -14;
+        char path[512];
+        if (strncpy_from_user(path, (const void *)(uintptr_t)a0, sizeof(path)) < 0)
+            return -14;
         struct process *p = sched_current_process();
         if (!p) return -1;
         uint16_t fmode = 0; uint32_t fuid = 0, fgid = 0;
-        if (vfs_file_stat((const char *)(uintptr_t)a0, &fmode, &fuid, &fgid) < 0) return -2;
+        if (vfs_file_stat(path, &fmode, &fuid, &fgid) < 0) return -2;
         if (p->cred.euid != 0 && p->cred.euid != fuid) return -1; /* EPERM */
-        return vfs_chmod((const char *)(uintptr_t)a0, (uint16_t)(a1 & 0xfffU));
+        return vfs_chmod(path, (uint16_t)(a1 & 0xfffU));
     }
     case SYS_SLEEP:   sched_sleep_ms(a0); return 0;
     case SYS_KILL: {
@@ -741,21 +841,26 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
         return 0;
     }
     case SYS_PS: {
-        if (a0 >= 0x800000000000ULL) return -14;
-        process_ps((char *)(uintptr_t)a0, (uint32_t)a1);
-        return 0;
+        if (!user_range_ok(a0, a1)) return -14;
+        if (a1 == 0) return 0;
+        char *kbuf = (char *)kmalloc((uint32_t)a1);
+        if (!kbuf) return -12;
+        process_ps(kbuf, (uint32_t)a1);
+        bool ok = copy_to_user((void *)(uintptr_t)a0, kbuf, (uint32_t)a1);
+        kfree(kbuf);
+        return ok ? 0 : -14;
     }
     case SYS_MEMINFO: {
-        if (a0 >= 0x800000000000ULL) return -14;
-        uint64_t *out = (uint64_t *)(uintptr_t)a0;
+        uint64_t out[2];
         out[0] = pmm_total_pages() * 4096ULL;
         out[1] = pmm_free_pages()  * 4096ULL;
+        if (!copy_to_user((void *)(uintptr_t)a0, out, sizeof(out))) return -14;
         return 0;
     }
     case SYS_DISKINFO: {
-        if (a0 >= 0x800000000000ULL) return -14;
-        uint64_t *out = (uint64_t *)(uintptr_t)a0;
+        uint64_t out[2];
         vfs_disk_stats(&out[0], &out[1]);
+        if (!copy_to_user((void *)(uintptr_t)a0, out, sizeof(out))) return -14;
         return 0;
     }
     case 169: {   /* sys_reboot — root-only */

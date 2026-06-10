@@ -48,6 +48,7 @@ KERNEL_C_SRCS := \
 	kernel/lib/string.c \
 	kernel/mem/heap.c \
 	kernel/mem/pmm.c \
+	kernel/mem/uaccess.c \
 	kernel/mem/vmm.c \
 	kernel/net/arp.c \
 	kernel/net/checksum.c \

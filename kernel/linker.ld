@@ -26,6 +26,10 @@ SECTIONS
 	. = ALIGN(0x1000);
 	.rodata : AT(ADDR(.rodata) - KERNEL_VMA + KERNEL_LMA) {
 		*(.rodata .rodata.*)
+		. = ALIGN(8);
+		__extable_start = .;
+		KEEP(*(.extable))
+		__extable_end = .;
 	} :rodata
 
 	. = ALIGN(0x1000);

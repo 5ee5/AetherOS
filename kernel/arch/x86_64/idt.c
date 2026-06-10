@@ -4,6 +4,7 @@
 
 #include "core/panic.h"
 #include "core/serial.h"
+#include "mem/uaccess.h"
 #include "proc/process.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
@@ -77,6 +78,17 @@ static uint64_t read_cr2(void)
 void x86_64_exception_dispatch(struct x86_64_interrupt_frame *frame)
 {
 	int user_mode = (frame->cs & 3U) == 3U;
+
+	/* Kernel-mode fault inside a user-copy routine (copy_to/from_user): recover
+	   via the exception table and return an error instead of panicking. Covers
+	   #PF (14, unmapped page) and #GP (13, non-canonical user pointer). */
+	if (!user_mode && (frame->vector == 14U || frame->vector == 13U)) {
+		uint64_t fixup = extable_lookup(frame->rip);
+		if (fixup != 0) {
+			frame->rip = fixup;
+			return;
+		}
+	}
 
 	serial_write("exception vector=");
 	serial_write_hex(frame->vector);
