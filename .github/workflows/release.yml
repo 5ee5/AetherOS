@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     branches: [master]
+    # Documentation-only changes shouldn't cut a release. GitHub skips the run
+    # only when *every* changed path matches; a push that also touches code
+    # (or this workflow) still releases as normal.
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
 
 permissions:
   contents: write
