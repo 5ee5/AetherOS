@@ -13,7 +13,7 @@
 #include "sched/thread.h"
 #include "security/cred.h"
 
-#define MAX_PROCS 16
+#define MAX_PROCS 64
 static struct process *s_procs[MAX_PROCS];
 static uint32_t next_pid = 1;
 
@@ -22,6 +22,18 @@ struct process *process_find(uint32_t pid)
     for (int i = 0; i < MAX_PROCS; ++i)
         if (s_procs[i] && s_procs[i]->pid == pid) return s_procs[i];
     return NULL;
+}
+
+/* Free an exited process's struct and release its table slot. Caller must
+   have already collected exit_status (e.g. from sys_waitpid). The associated
+   thread struct is freed independently by the scheduler's deferred reaper. */
+void process_reap(struct process *proc)
+{
+    if (!proc) return;
+    for (int i = 0; i < MAX_PROCS; ++i) {
+        if (s_procs[i] == proc) { s_procs[i] = NULL; break; }
+    }
+    kfree(proc);
 }
 
 struct process *process_create_from_result(const elf_load_result_t *r)

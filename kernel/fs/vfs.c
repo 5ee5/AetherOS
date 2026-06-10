@@ -137,9 +137,68 @@ bool vfs_init(void)
     return true;
 }
 
+/* ---- Path resolution ------------------------------------------------------ */
+
+/* The kernel's own cwd, used when no process context is available. */
+static char s_kernel_cwd[256] = "/";
+
+/* Resolve a possibly-relative path to a normalized absolute path in `out`.
+   Relative paths are taken against the current process cwd (or the kernel cwd).
+   Collapses ".", "..", and redundant slashes. ext2 requires absolute paths. */
+static const char *vfs_resolve(const char *path, char *out, uint32_t outsz)
+{
+    char tmp[512];
+
+    if (path && path[0] == '/') {
+        strncpy(tmp, path, sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+    } else {
+        struct process *proc = sched_current_process();
+        const char *cwd = proc ? proc->cwd : s_kernel_cwd;
+        strncpy(tmp, cwd, sizeof(tmp) - 1);
+        tmp[sizeof(tmp) - 1] = '\0';
+        uint32_t n = strlen(tmp);
+        if ((n == 0 || tmp[n - 1] != '/') && n < sizeof(tmp) - 1) {
+            tmp[n] = '/'; tmp[n + 1] = '\0';
+        }
+        if (path) strncat(tmp, path, sizeof(tmp) - 1 - strlen(tmp));
+    }
+
+    /* Normalize components into out. */
+    char *o = out;
+    *o = '\0';
+    const char *p = tmp;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        const char *start = p;
+        while (*p && *p != '/') p++;
+        uint32_t len = (uint32_t)(p - start);
+        if (len == 1 && start[0] == '.') {
+            continue;
+        } else if (len == 2 && start[0] == '.' && start[1] == '.') {
+            /* Pop the last component from out. */
+            char *last = out;
+            for (char *r = out; r < o; r++)
+                if (*r == '/') last = r;
+            o = last;
+            *o = '\0';
+        } else {
+            if ((uint32_t)(o - out) + len + 1U >= outsz) break; /* overflow guard */
+            *o++ = '/';
+            for (uint32_t i = 0; i < len; i++) *o++ = start[i];
+            *o = '\0';
+        }
+    }
+    if (out[0] == '\0') { out[0] = '/'; out[1] = '\0'; }
+    return out;
+}
+
 int vfs_open(const char *path)
 {
     if (!s_root_fs) return -1;
+    char abuf[512];
+    path = vfs_resolve(path, abuf, sizeof(abuf));
 
     uint32_t ino;
     if (!ext2_lookup(s_root_fs, path, &ino)) return -1;
@@ -173,6 +232,8 @@ void vfs_close(int fd)
 uint64_t vfs_file_size(const char *path)
 {
     if (!s_root_fs) return UINT64_MAX;
+    char abuf[512];
+    path = vfs_resolve(path, abuf, sizeof(abuf));
     uint32_t ino;
     if (!ext2_lookup(s_root_fs, path, &ino)) return UINT64_MAX;
     return ext2_file_size(s_root_fs, ino);
@@ -181,6 +242,8 @@ uint64_t vfs_file_size(const char *path)
 uint32_t vfs_listdir(const char *path, char *buf, uint32_t bufsz, uint32_t flags)
 {
     if (!s_root_fs) return 0;
+    char abuf[512];
+    path = vfs_resolve(path, abuf, sizeof(abuf));
     uint32_t ino;
     if (!ext2_lookup(s_root_fs, path, &ino)) return 0;
     return ext2_list_dir(s_root_fs, ino, buf, bufsz, flags);
@@ -198,6 +261,8 @@ int64_t vfs_write(int fd, const void *buf, uint32_t size)
 int vfs_open_ex(const char *path, int flags)
 {
     if (!s_root_fs) return -1;
+    char abuf[512];
+    path = vfs_resolve(path, abuf, sizeof(abuf));
 
     uint32_t ino = 0;
     bool found = ext2_lookup(s_root_fs, path, &ino);
@@ -227,6 +292,8 @@ int vfs_open_ex(const char *path, int flags)
 int vfs_creat(const char *path)
 {
     if (!s_root_fs) return -1;
+    char abuf[512];
+    path = vfs_resolve(path, abuf, sizeof(abuf));
     struct process *p = sched_current_process();
     uint32_t uid = p ? p->cred.euid : 0;
     uint32_t gid = p ? p->cred.egid : 0;
@@ -236,6 +303,8 @@ int vfs_creat(const char *path)
 int vfs_mkdir(const char *path)
 {
     if (!s_root_fs) return -1;
+    char abuf[512];
+    path = vfs_resolve(path, abuf, sizeof(abuf));
     struct process *p = sched_current_process();
     uint32_t uid = p ? p->cred.euid : 0;
     uint32_t gid = p ? p->cred.egid : 0;
@@ -245,36 +314,27 @@ int vfs_mkdir(const char *path)
 int vfs_unlink(const char *path)
 {
     if (!s_root_fs) return -1;
+    char abuf[512];
+    path = vfs_resolve(path, abuf, sizeof(abuf));
     return ext2_unlink(s_root_fs, path) ? 0 : -1;
 }
 
 /* ---- Working directory ---------------------------------------------------- */
 
-static char s_kernel_cwd[256] = "/";
-
 int vfs_chdir(const char *path)
 {
     if (!s_root_fs || !path) return -1;
-    /* Verify the path exists and is a directory. */
+
+    /* Resolve to a normalized absolute path, then verify it exists. */
+    char abuf[512];
+    vfs_resolve(path, abuf, sizeof(abuf));
     uint32_t ino = 0;
-    if (!ext2_lookup(s_root_fs, path, &ino)) return -1;
+    if (!ext2_lookup(s_root_fs, abuf, &ino)) return -1;
 
     struct process *proc = sched_current_process();
     char *cwd = proc ? proc->cwd : s_kernel_cwd;
-
-    /* Normalise: handle relative paths (currently the VFS only handles absolute). */
-    if (path[0] == '/') {
-        strncpy(cwd, path, 255);
-        cwd[255] = '\0';
-    } else {
-        /* Append to current cwd. */
-        uint32_t base_len = strlen(cwd);
-        if (base_len > 0 && cwd[base_len - 1] != '/') {
-            if (base_len < 254) { cwd[base_len] = '/'; cwd[base_len + 1] = '\0'; base_len++; }
-        }
-        strncat(cwd, path, 255 - base_len);
-        cwd[255] = '\0';
-    }
+    strncpy(cwd, abuf, 255);
+    cwd[255] = '\0';
     return 0;
 }
 
@@ -291,6 +351,8 @@ int vfs_getcwd(char *buf, uint32_t size)
 int vfs_file_stat(const char *path, uint16_t *out_mode, uint32_t *out_uid, uint32_t *out_gid)
 {
     if (!s_root_fs) return -1;
+    char abuf[512];
+    path = vfs_resolve(path, abuf, sizeof(abuf));
     uint32_t ino;
     if (!ext2_lookup(s_root_fs, path, &ino)) return -1;
     return ext2_inode_stat(s_root_fs, ino, out_mode, out_uid, out_gid) ? 0 : -1;
@@ -299,6 +361,8 @@ int vfs_file_stat(const char *path, uint16_t *out_mode, uint32_t *out_uid, uint3
 int vfs_chown(const char *path, uint32_t uid, uint32_t gid)
 {
     if (!s_root_fs) return -1;
+    char abuf[512];
+    path = vfs_resolve(path, abuf, sizeof(abuf));
     uint32_t ino;
     if (!ext2_lookup(s_root_fs, path, &ino)) return -1;
     return ext2_inode_chown(s_root_fs, ino, uid, gid) ? 0 : -1;
@@ -307,12 +371,16 @@ int vfs_chown(const char *path, uint32_t uid, uint32_t gid)
 int vfs_chmod(const char *path, uint16_t mode)
 {
     if (!s_root_fs) return -1;
+    char abuf[512];
+    path = vfs_resolve(path, abuf, sizeof(abuf));
     return ext2_chmod(s_root_fs, path, mode);
 }
 
 int vfs_stat(const char *path, ext2_stat_t *out)
 {
     if (!s_root_fs || !out) return -1;
+    char abuf[512];
+    path = vfs_resolve(path, abuf, sizeof(abuf));
     uint32_t ino;
     if (!ext2_lookup(s_root_fs, path, &ino)) return -1;
     return ext2_stat_full(s_root_fs, ino, out) ? 0 : -1;
@@ -321,7 +389,10 @@ int vfs_stat(const char *path, ext2_stat_t *out)
 int vfs_rename(const char *old_path, const char *new_path)
 {
     if (!s_root_fs) return -1;
-    return ext2_rename(s_root_fs, old_path, new_path) ? 0 : -1;
+    char oldbuf[512], newbuf[512];
+    vfs_resolve(old_path, oldbuf, sizeof(oldbuf));
+    vfs_resolve(new_path, newbuf, sizeof(newbuf));
+    return ext2_rename(s_root_fs, oldbuf, newbuf) ? 0 : -1;
 }
 
 void vfs_disk_stats(uint64_t *total_bytes, uint64_t *free_bytes)

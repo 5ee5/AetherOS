@@ -32,6 +32,9 @@ struct process *process_create_from_elf(const void *elf_data, uint64_t size);
 /* Look up a process by PID. Returns NULL if not found. */
 struct process *process_find(uint32_t pid);
 
+/* Free an exited process's struct and release its table slot. */
+void process_reap(struct process *proc);
+
 /* Forcibly terminate a process (SIGKILL semantics). Safe to call from kernel. */
 void process_kill(struct process *proc);
 

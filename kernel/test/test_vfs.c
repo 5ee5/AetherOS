@@ -79,4 +79,12 @@ void test_vfs_run(void)
     KTEST_ASSERT(vfs_file_size("/ktest_rename_dst.txt") != UINT64_MAX);
 
     vfs_unlink("/ktest_rename_dst.txt");
+
+    /* ---- Relative / normalized path resolution (Phase 1c) ------------------
+       The kernel cwd is "/", so each of these must resolve to /hello.txt. */
+    KTEST_ASSERT(vfs_file_size("hello.txt")        == sz);  /* relative      */
+    KTEST_ASSERT(vfs_file_size("/./hello.txt")     == sz);  /* "." collapse  */
+    KTEST_ASSERT(vfs_file_size("/a/../hello.txt")  == sz);  /* ".." collapse */
+    KTEST_ASSERT(vfs_file_size("//hello.txt")      == sz);  /* double slash  */
+    KTEST_ASSERT(vfs_file_size("/../hello.txt")    == sz);  /* ".." at root  */
 }

@@ -333,6 +333,8 @@ static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
     }
     if (status_virt && status_virt < 0x800000000000ULL)
         *(int32_t *)(uintptr_t)status_virt = target->exit_status << 8;
+    /* Parent has collected the status: free the zombie's struct and table slot. */
+    process_reap(target);
     return (int64_t)pid;
 }
 
@@ -379,8 +381,9 @@ static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
     if (!elf_load(buf, fsize, &result)) { kfree(buf); return -1; }
     kfree(buf);
 
-    /* Copy argv strings from user space into kernel buffers. */
-    static char arg_store[MAX_SPAWN_ARGS][MAX_ARG_LEN];
+    /* Copy argv strings from user space into kernel buffers. Local (not static)
+       so concurrent spawns don't clobber each other (4 KiB on a 64 KiB kstack). */
+    char arg_store[MAX_SPAWN_ARGS][MAX_ARG_LEN];
     int argc = 0;
     if (argv_virt && argv_virt < 0x800000000000ULL) {
         uint64_t *argv = (uint64_t *)(uintptr_t)argv_virt;
@@ -689,7 +692,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_WRITE:   return sys_write(a0, a1, a2);
     case SYS_OPEN:    return sys_open(a0, a1, a2);
     case SYS_CLOSE:   return sys_close(a0);
-    case SYS_GETPID:  return (int64_t)sched_current()->tid;
+    case SYS_GETPID:  { struct process *p = sched_current_process(); return p ? (int64_t)p->pid : 0; }
     case SYS_EXIT:    return sys_exit(a0);
     case SYS_WAITPID: return sys_waitpid(a0, a1, a2);
     case SYS_GETUID:  { struct process *p = (struct process *)sched_current()->process; return p ? (int64_t)p->cred.uid  : 0; }
