@@ -376,12 +376,6 @@ static uint64_t align_up(uint64_t value, uint64_t alignment)
 	return (value + alignment - 1ULL) & ~(alignment - 1ULL);
 }
 
-/* Physical extent spanned by every alloc_low_pages() allocation.  The kernel
-   keeps these pages live after ExitBootServices (page tables, boot_info, memory
-   map), so the PMM must reserve them.  See struct os_boot_info. */
-static uint64_t g_loader_lo = UINT64_MAX;
-static uint64_t g_loader_hi;
-
 static void *alloc_low_pages(struct efi_system_table *st, uint64_t pages)
 {
 	efi_physical_address_t address =
@@ -392,12 +386,6 @@ static void *alloc_low_pages(struct efi_system_table *st, uint64_t pages)
 		die(st, "AllocatePages below early direct-map limit failed");
 	}
 	mem_set((void *)(uintptr_t)address, 0, pages * OS_PAGE_SIZE);
-	if (address < g_loader_lo) {
-		g_loader_lo = address;
-	}
-	if (address + pages * OS_PAGE_SIZE > g_loader_hi) {
-		g_loader_hi = address + pages * OS_PAGE_SIZE;
-	}
 	return (void *)(uintptr_t)address;
 }
 
@@ -738,11 +726,6 @@ static void get_final_memory_map_and_exit(struct efi_system_table *st,
 		boot_info->memory_map_size = current_size;
 		boot_info->memory_descriptor_size = descriptor_size;
 		boot_info->memory_descriptor_version = descriptor_version;
-
-		/* Capture the loader allocation extent last, after the memory map
-		   (the final alloc_low_pages caller) so the PMM reserves it all. */
-		boot_info->loader_reserved_start = g_loader_lo;
-		boot_info->loader_reserved_end = g_loader_hi;
 
 		status = st->boot_services->exit_boot_services(image_handle,
 			map_key);

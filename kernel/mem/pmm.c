@@ -87,9 +87,14 @@ void pmm_init(const struct os_boot_info *boot_info)
 		offset += boot_info->memory_descriptor_size) {
 		const struct os_uefi_memory_descriptor *desc =
 			(const struct os_uefi_memory_descriptor *)(map + offset);
+		/* EFI_LOADER_DATA is deliberately NOT reclaimed: the bootloader
+		   allocates the kernel's page tables, boot_info, and the UEFI
+		   memory map there, and the kernel keeps using them after
+		   ExitBootServices.  Freeing them would let the PMM hand out the
+		   kernel's own live page tables. LOADER_CODE (the bootloader image)
+		   and boot-services memory are safe to reclaim. */
 		if (desc->type == OS_EFI_CONVENTIONAL_MEMORY ||
 			desc->type == OS_EFI_LOADER_CODE ||
-			desc->type == OS_EFI_LOADER_DATA ||
 			desc->type == OS_EFI_BOOT_SERVICES_CODE ||
 			desc->type == OS_EFI_BOOT_SERVICES_DATA) {
 			uint64_t start = desc->physical_start;
@@ -103,14 +108,6 @@ void pmm_init(const struct os_boot_info *boot_info)
 		boot_info->kernel_phys_end);
 	mark_range_used(boot_info->page_table_root,
 		boot_info->page_table_root + OS_PAGE_SIZE);
-
-	/* Reserve the bootloader's still-live allocations (page tables, boot_info,
-	   UEFI memory map).  Without this the PMM reclaims the kernel's own active
-	   page tables as free RAM and later corrupts them under memory pressure. */
-	if (boot_info->loader_reserved_end > boot_info->loader_reserved_start) {
-		mark_range_used(boot_info->loader_reserved_start,
-			boot_info->loader_reserved_end);
-	}
 
 	serial_write("pmm: total_pages=");
 	serial_write_dec(pmm_total);
