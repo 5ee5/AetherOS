@@ -309,6 +309,14 @@ bool vmm_space_map(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t fl
 	uint64_t pdi   = (virt >> 21U) & INDEX_MASK;
 	uint64_t pti   = (virt >> 12U) & INDEX_MASK;
 
+	/* Refuse to map into the kernel half (PML4 indices 256-511).  Those
+	   entries are copied into every address space and share the kernel's
+	   page tables, so a per-process mapping there would corrupt global
+	   kernel state.  Per-process mappings must stay in the user half. */
+	if (pml4i >= 256U) {
+		return false;
+	}
+
 	/* User-accessible intermediate tables get the USER flag. */
 	uint64_t user_flag = (flags & VMM_USER) ? VMM_USER : 0;
 

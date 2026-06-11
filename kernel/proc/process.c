@@ -130,8 +130,9 @@ static uint32_t ps_fmt_uint(char *out, uint32_t val, uint32_t width)
     return off;
 }
 
-void process_ps(char *buf, uint32_t bufsz)
+uint32_t process_ps(char *buf, uint32_t bufsz)
 {
+    if (bufsz == 0) return 0;
     static const char hdr[] = "  PID   UID  NAME\n";
     uint32_t off = 0;
     for (uint32_t i = 0; hdr[i] && off + 1 < bufsz; i++)
@@ -153,7 +154,15 @@ void process_ps(char *buf, uint32_t bufsz)
             buf[off++] = nm[k];
         buf[off++] = '\n';
     }
-    if (off < bufsz) buf[off] = '\0';
+    /* NUL-terminate and return the number of valid bytes (including the
+       terminator).  The caller must copy only this many bytes to userspace so
+       it never exposes the uninitialized remainder of the heap buffer. */
+    if (off < bufsz) {
+        buf[off] = '\0';
+        return off + 1;
+    }
+    buf[bufsz - 1] = '\0';
+    return bufsz;
 }
 
 struct process *process_create_from_elf(const void *elf_data, uint64_t size)

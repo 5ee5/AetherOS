@@ -862,8 +862,10 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
         if (a1 == 0) return 0;
         char *kbuf = (char *)kmalloc((uint32_t)a1);
         if (!kbuf) return -12;
-        process_ps(kbuf, (uint32_t)a1);
-        bool ok = copy_to_user((void *)(uintptr_t)a0, kbuf, (uint32_t)a1);
+        /* Copy only the bytes process_ps actually wrote (incl. NUL); copying
+           the full allocation would leak uninitialized kernel heap memory. */
+        uint32_t n = process_ps(kbuf, (uint32_t)a1);
+        bool ok = copy_to_user((void *)(uintptr_t)a0, kbuf, n);
         kfree(kbuf);
         return ok ? 0 : -14;
     }

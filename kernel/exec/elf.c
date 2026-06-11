@@ -61,7 +61,10 @@ bool elf_load(const void *image, uint64_t size, elf_load_result_t *out)
     /* Load each PT_LOAD segment. */
     for (uint16_t i = 0; i < eh->e_phnum; ++i) {
         uint64_t phdr_off = eh->e_phoff + (uint64_t)i * eh->e_phentsize;
-        if (phdr_off + sizeof(struct elf64_phdr) > size) {
+        /* Overflow-safe bounds check: reject if the addition wrapped past
+           2^64 or the header would extend past the loaded image. */
+        if (phdr_off < eh->e_phoff || phdr_off > size ||
+            size - phdr_off < sizeof(struct elf64_phdr)) {
             serial_write("elf: phdr out of bounds\n");
             return false;
         }
@@ -71,7 +74,8 @@ bool elf_load(const void *image, uint64_t size, elf_load_result_t *out)
         if (ph->p_type != PT_LOAD || ph->p_memsz == 0) {
             continue;
         }
-        if (ph->p_offset + ph->p_filesz > size) {
+        /* Overflow-safe bounds check on the segment's on-image file data. */
+        if (ph->p_offset > size || size - ph->p_offset < ph->p_filesz) {
             serial_write("elf: segment file data out of bounds\n");
             return false;
         }
@@ -81,10 +85,19 @@ bool elf_load(const void *image, uint64_t size, elf_load_result_t *out)
             flags |= VMM_WRITABLE;
         }
 
-        uint64_t npages = div_ceil(ph->p_memsz, PAGE_SIZE);
         uint64_t vbase  = ph->p_vaddr & ~(PAGE_SIZE - 1ULL);
         uint64_t vend   = ph->p_vaddr + ph->p_memsz;
-        npages = div_ceil(vend - vbase, PAGE_SIZE);
+        /* Confine the segment to the user address range.  A crafted ELF could
+           otherwise request a kernel-half p_vaddr; vmm_space_map walks the
+           kernel page tables (shared across every address space), so such a
+           mapping would corrupt global kernel memory and grant userspace
+           access to it.  Also rejects the p_vaddr + p_memsz overflow case. */
+        if (vend < ph->p_vaddr || ph->p_vaddr >= USER_STACK_TOP ||
+            vend > USER_STACK_TOP) {
+            serial_write("elf: segment vaddr out of user range\n");
+            return false;
+        }
+        uint64_t npages = div_ceil(vend - vbase, PAGE_SIZE);
 
         const uint8_t *src = (const uint8_t *)image + ph->p_offset;
         uint64_t bytes_left = ph->p_filesz;

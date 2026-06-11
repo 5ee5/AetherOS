@@ -38,7 +38,8 @@ void process_reap(struct process *proc);
 /* Forcibly terminate a process (SIGKILL semantics). Safe to call from kernel. */
 void process_kill(struct process *proc);
 
-/* Fill buf with a human-readable process table (null-terminated). */
-void process_ps(char *buf, uint32_t bufsz);
+/* Fill buf with a human-readable process table (null-terminated).
+   Returns the number of bytes written, including the NUL terminator. */
+uint32_t process_ps(char *buf, uint32_t bufsz);
 
 #endif
