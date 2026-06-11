@@ -420,6 +420,21 @@ static bool path_split(const char *path, char *parent, char *name)
     return true;
 }
 
+/* Validate an on-disk directory entry at p within a block ending at end.
+   Guards against a corrupt or hostile filesystem: the 8-byte header must fit,
+   rec_len must be large enough to hold the (4-byte aligned) name, and must not
+   advance p past the end of the block.  Returns false for an invalid or
+   terminating entry, which callers treat as end-of-block. */
+static bool dirent_valid(const uint8_t *p, const uint8_t *end)
+{
+    if (p > end || (uint64_t)(end - p) < 8U) return false;
+    const ext2_dirent_t *de = (const ext2_dirent_t *)p;
+    uint32_t min_len = (uint32_t)(8U + (((uint32_t)de->name_len + 3U) & ~3U));
+    if (de->rec_len < min_len) return false;
+    if ((uint64_t)de->rec_len > (uint64_t)(end - p)) return false;
+    return true;
+}
+
 /* Add a directory entry to dir_ino.  Returns true on success. */
 static bool dir_add_entry(ext2_fs_t *fs, uint32_t dir_ino,
                           const char *name, uint32_t child_ino, uint8_t ftype)
@@ -443,7 +458,7 @@ static bool dir_add_entry(ext2_fs_t *fs, uint32_t dir_ino,
         uint8_t *end = blk + fs->block_size;
         while (p < end) {
             ext2_dirent_t *de = (ext2_dirent_t *)p;
-            if (de->rec_len == 0) break;
+            if (!dirent_valid(p, end)) break;
             uint32_t actual = (uint32_t)(8 + ((de->name_len + 3) & ~3U));
             if (de->inode == 0 && de->rec_len >= needed) {
                 /* Reuse a deleted slot. */
@@ -523,7 +538,7 @@ static bool dir_remove_entry(ext2_fs_t *fs, uint32_t dir_ino, const char *name)
         uint8_t *p = blk, *end = blk + fs->block_size;
         while (p < end) {
             ext2_dirent_t *de = (ext2_dirent_t *)p;
-            if (de->rec_len == 0) break;
+            if (!dirent_valid(p, end)) break;
             if (de->inode != 0 && de->name_len == name_len &&
                 memcmp(de->name, name, name_len) == 0) {
                 de->inode = 0;
@@ -587,7 +602,7 @@ static uint32_t dir_find_in_block(const uint8_t *block, uint32_t block_size,
     const uint8_t *end = block + block_size;
     while (p < end) {
         const ext2_dirent_t *de = (const ext2_dirent_t *)p;
-        if (de->rec_len == 0) break;
+        if (!dirent_valid(p, end)) break;
         if (de->inode != 0 && de->name_len == name_len &&
             memcmp(de->name, name, name_len) == 0) {
             return de->inode;
@@ -715,7 +730,7 @@ static uint32_t list_dir_block(const uint8_t *block, uint32_t block_size,
     const uint8_t *end = block + block_size;
     while (p < end) {
         const ext2_dirent_t *de = (const ext2_dirent_t *)p;
-        if (de->rec_len == 0) break;
+        if (!dirent_valid(p, end)) break;
         if (de->inode != 0 && de->name_len > 0) {
             bool is_dot = (de->name_len == 1 && de->name[0] == '.');
             bool is_dotdot = (de->name_len == 2 &&
@@ -1091,7 +1106,7 @@ bool ext2_rename(ext2_fs_t *fs, const char *old_path, const char *new_path)
                 bool updated = false;
                 while (p < end) {
                     ext2_dirent_t *de = (ext2_dirent_t *)p;
-                    if (de->rec_len == 0) break;
+                    if (!dirent_valid(p, end)) break;
                     if (de->inode != 0 && de->name_len == 2 &&
                         de->name[0] == '.' && de->name[1] == '.') {
                         de->inode = dst_parent_ino;

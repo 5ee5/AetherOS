@@ -22,6 +22,7 @@ struct thread {
 	uint32_t       tid;
 	bool           is_idle;    /* never add to run queue */
 	bool           is_user;    /* ring-3 thread; cr3 is valid */
+	volatile bool  on_cpu;     /* executing on a CPU now; gates cross-CPU wakeups */
 	uint64_t       cr3;        /* PML4 phys for user thread (0 = kernel) */
 	struct thread *run_next;     /* run queue linkage */
 	struct thread *wait_next;    /* wait/blocked queue linkage */

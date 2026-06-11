@@ -882,9 +882,9 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
         if (!copy_to_user((void *)(uintptr_t)a0, out, sizeof(out))) return -14;
         return 0;
     }
-    case 169: {   /* sys_reboot — root-only */
+    case 169: {   /* sys_reboot — root-only (effective uid) */
         struct process *p = sched_current_process();
-        if (!p || p->cred.uid != 0) return -1;
+        if (!p || p->cred.euid != 0) return -1;
         if (a0 == 0) acpi_poweroff();
         else         acpi_reboot();
         return 0;

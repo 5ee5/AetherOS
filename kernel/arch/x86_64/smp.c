@@ -5,6 +5,7 @@
 
 #include "acpi/acpi.h"
 #include "arch/x86_64/apic.h"
+#include "arch/x86_64/cpu.h"
 #include "core/panic.h"
 #include "core/serial.h"
 #include "mem/heap.h"
@@ -112,6 +113,15 @@ uint32_t smp_init(const struct acpi_madt_info *madt)
 	for (uint32_t i = 0; i < madt->cpu_count; ++i) {
 		uint8_t id = madt->cpu_lapic_ids[i];
 		if (id == bsp_id) {
+			continue;
+		}
+		if (id >= MAX_CPUS) {
+			/* Per-CPU tables are indexed by LAPIC ID and hold only
+			   MAX_CPUS slots; we cannot track this AP, so skip it
+			   rather than overrun those arrays. */
+			serial_write("smp: skipping AP, lapic_id >= MAX_CPUS: ");
+			serial_write_dec(id);
+			serial_write("\n");
 			continue;
 		}
 

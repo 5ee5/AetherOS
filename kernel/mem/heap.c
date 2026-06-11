@@ -119,6 +119,11 @@ void heap_init(void)
 /* Core allocator; caller must hold heap_lock. */
 static void *kmalloc_locked(uint64_t size)
 {
+	/* Reject sizes so large that rounding up or adding the block header would
+	   overflow uint64 and wrap to a tiny allocation. */
+	if (size > UINT64_MAX - sizeof(struct block) - 16U) {
+		return NULL;
+	}
 	size = (size + 15U) & ~15ULL;  /* 16-byte alignment */
 	uint64_t total = size + sizeof(struct block);
 

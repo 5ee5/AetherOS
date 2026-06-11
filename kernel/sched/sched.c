@@ -64,6 +64,19 @@ static struct thread *cpu_idle[MAX_CPUS];
    kstack while still running on it; deferring one tick ensures we've switched). */
 static struct thread *reap_pending[MAX_CPUS];
 
+/* The executing CPU's LAPIC ID, validated as a per-CPU array index.  smp_init
+   refuses to start an AP whose LAPIC ID is >= MAX_CPUS and sched_init rejects
+   such a BSP, so an out-of-range ID reaching here is a bug rather than normal
+   topology — fail loudly instead of corrupting memory past the arrays. */
+static uint32_t current_cpu_id(void)
+{
+	uint32_t id = lapic_id();
+	if (id >= MAX_CPUS) {
+		panic("sched: LAPIC ID exceeds MAX_CPUS");
+	}
+	return id;
+}
+
 /* ---- Public API -------------------------------------------------------- */
 
 void sched_init(void)
@@ -73,8 +86,9 @@ void sched_init(void)
 
 	/* Register the BSP as thread 0. */
 	struct thread *bsp = thread_create_current();
-	uint32_t cpu = lapic_id();
+	uint32_t cpu = current_cpu_id();
 	cpu_current[cpu] = bsp;
+	bsp->on_cpu = true;
 
 	/* Create the BSP idle thread (not added to run queue). */
 	cpu_idle[cpu] = thread_create_idle();
@@ -98,7 +112,7 @@ void sched_add(struct thread *t)
 
 struct thread *sched_current(void)
 {
-	return cpu_current[lapic_id()];
+	return cpu_current[current_cpu_id()];
 }
 
 struct process *sched_current_process(void)
@@ -110,6 +124,15 @@ struct process *sched_current_process(void)
 
 void sched_wake(struct thread *t)
 {
+	/* Wait until the thread has left its CPU before making it runnable.  A
+	   thread blocks by setting BLOCKED, dropping its lock, then yielding via
+	   int $0x20; a waker on another CPU can run in that window.  Enqueuing the
+	   thread before it has saved its context would let a third CPU resume it on
+	   its still-live stack.  sched_tick clears on_cpu once the context is saved;
+	   callers only wake already-blocked threads, so this spins briefly. */
+	while (t->on_cpu) {
+		__asm__ volatile("pause" ::: "memory");
+	}
 	spinlock_acquire(&rq_lock);
 	t->state = THREAD_READY;
 	rq_add(t);
@@ -118,7 +141,7 @@ void sched_wake(struct thread *t)
 
 uint64_t sched_tick(uint64_t old_rsp)
 {
-	uint32_t cpu = lapic_id();
+	uint32_t cpu = current_cpu_id();
 
 	/* Free any thread that died during the previous tick.  We deferred this
 	   because we couldn't kfree a stack while still running on it. */
@@ -165,6 +188,13 @@ uint64_t sched_tick(uint64_t old_rsp)
 		next = cpu_idle[cpu];
 	}
 	next->state      = THREAD_RUNNING;
+	/* Hand off the on_cpu marker: cur's context was saved above, so clearing
+	   its flag lets a waker on another CPU safely enqueue it; mark the incoming
+	   thread as running on this CPU.  (See sched_wake.) */
+	if (cur != next) {
+		cur->on_cpu = false;
+	}
+	next->on_cpu     = true;
 	cpu_current[cpu] = next;
 
 	spinlock_release(&rq_lock);
@@ -200,13 +230,16 @@ void sched_sleep_ms(uint64_t ms)
 
 void sched_ap_prepare(uint32_t cpu_id)
 {
+	if (cpu_id >= MAX_CPUS) {
+		return;
+	}
 	/* Allocate on the BSP before the AP is started so no alloc races with tests. */
 	cpu_idle[cpu_id] = thread_create_idle();
 }
 
 void sched_ap_enter(void)
 {
-	uint32_t cpu = lapic_id();
+	uint32_t cpu = current_cpu_id();
 	/* Idle thread was pre-allocated by the BSP via sched_ap_prepare. */
 	struct thread *idle = cpu_idle[cpu];
 	if (idle == NULL) {
@@ -215,6 +248,7 @@ void sched_ap_enter(void)
 		cpu_idle[cpu] = idle;
 	}
 	cpu_current[cpu] = idle;
+	idle->on_cpu = true;
 
 	/* Set up per-CPU GS-base data for SYSCALL/SYSRET. */
 	cpu_local_init(cpu);
