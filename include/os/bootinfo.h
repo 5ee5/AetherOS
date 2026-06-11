@@ -56,6 +56,14 @@ struct os_boot_info {
 	uint64_t direct_map_base;
 	uint64_t direct_map_size;
 	uint64_t page_table_root;
+
+	/* Physical extent of the pages the bootloader allocated that the kernel
+	   continues to use after ExitBootServices: the page tables, this boot_info
+	   struct, and the UEFI memory map.  These are EFI_LOADER_DATA and would
+	   otherwise be reclaimed as free RAM by the PMM, which would then hand out
+	   the kernel's own live page tables.  The PMM marks [start, end) used. */
+	uint64_t loader_reserved_start;
+	uint64_t loader_reserved_end;
 };
 
 struct os_uefi_memory_descriptor {

@@ -63,6 +63,16 @@ int gpt_read(blkdev_t *dev, gpt_partition_t *parts, int max)
     uint32_t entry_size  = hdr.size_of_partition_entry;
     uint32_t entry_count = hdr.num_partition_entries;
 
+    /* Validate untrusted on-disk fields before using them as divisors / bounds.
+       A zero or oversized entry size would divide-by-zero (#DE) or index past
+       the 512-byte sector buffer. GPT entries are 128 bytes and must fit in a
+       sector. Also cap the entry count to a sane maximum. */
+    if (entry_size < sizeof(gpt_entry_t) || entry_size > 512U ||
+        (512U % entry_size) != 0U || entry_count > 4096U) {
+        pmm_free_page(buf_phys);
+        return 0;
+    }
+
     /* Walk partition entries (one sector holds 512/entry_size entries). */
     uint32_t per_sector = 512U / entry_size;
 

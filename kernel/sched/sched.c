@@ -148,6 +148,14 @@ uint64_t sched_tick(uint64_t old_rsp)
 	if (reap_pending[cpu] != NULL) {
 		struct thread *dead = reap_pending[cpu];
 		reap_pending[cpu] = NULL;
+		/* Tear down the user address space here rather than in sys_exit:
+		   by now CR3 has been switched to another thread, so the dead
+		   thread's PML4 and page tables are no longer the active CR3 and
+		   are safe to free.  Covers exit, kill, and segfault uniformly. */
+		if (dead->is_user && dead->cr3 != 0) {
+			vmm_space_destroy(dead->cr3);
+			dead->cr3 = 0;
+		}
 		kfree(dead->kstack);
 		kfree(dead);
 	}

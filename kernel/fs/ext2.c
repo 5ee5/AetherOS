@@ -573,6 +573,12 @@ ext2_fs_t *ext2_mount(blkdev_t *dev, uint64_t part_offset_lba)
 
     if (sb.s_magic != EXT2_SUPER_MAGIC) return NULL;
 
+    /* read_block/write_block bounce through a single 4 KiB PMM page, so a block
+       size larger than a page would DMA/memcpy past it into adjacent physical
+       memory.  Reject anything outside the supported 1024..4096 range (the rest
+       of the driver also assumes 1024-byte blocks). s_log_block_size is clamped
+       so the shift cannot overflow. */
+    if (sb.s_log_block_size > 2U) return NULL;   /* >4096-byte blocks */
     uint32_t block_size = 1024U << sb.s_log_block_size;
 
     ext2_fs_t *fs = kmalloc(sizeof(ext2_fs_t));

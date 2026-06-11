@@ -341,22 +341,13 @@ static int64_t sys_exit(uint64_t status)
             if (ft == FD_PIPE_WRITE) pipe_close_write(proc->fds.fds[i].id);
             proc->fds.fds[i].open = false;
         }
-        proc->exit_status = (int32_t)(status & 0xffU);
-        proc->exited = true;
-        struct thread *w = proc->wait_queue;
-        proc->wait_queue = NULL;
-        while (w) {
-            struct thread *nxt = w->wait_next;
-            w->wait_next = NULL;
-            sched_wake(w);
-            w = nxt;
-        }
+        /* Record exit status and wake sys_waitpid callers (lock-protected). */
+        process_mark_exited(proc, (int32_t)(status & 0xffU));
     }
 
-    if (t->is_user && t->cr3 != 0) {
-        vmm_space_destroy(t->cr3);
-        t->cr3 = 0;
-    }
+    /* The address space is destroyed by the scheduler reaper once this thread
+       has been switched off its own CR3; freeing it here would tear down the
+       page tables still loaded in CR3 (a use-after-free on SMP). */
 
     /* Disable interrupts, mark dead, and force a reschedule. */
     __asm__ volatile("cli" ::: "memory");
@@ -374,7 +365,6 @@ static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
     (void)options;
     struct process *target = process_find((uint32_t)pid);
     if (!target) return -10;   /* ECHILD */
-    struct thread *t = sched_current();
     while (!target->exited) {
         /* Non-blocking serial peek: if user sends Ctrl+C, kill the process. */
         char c = serial_read_char();
@@ -383,10 +373,8 @@ static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
             serial_write("^C\n");
             break;
         }
-        t->wait_next = target->wait_queue;
-        target->wait_queue = t;
-        t->state = THREAD_BLOCKED;
-        __asm__ volatile("cli; int $0x20; sti" ::: "memory");
+        /* Block until the target exits (lock-protected; no lost wakeup). */
+        process_wait(target);
     }
     if (status_virt) {
         int32_t st = target->exit_status << 8;
@@ -400,8 +388,13 @@ static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
 #define MAX_SPAWN_ARGS 16
 #define MAX_ARG_LEN    256
 
-static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
-                         int64_t stdin_fd_parent, int64_t stdout_fd_parent)
+/* Build a process from an ELF path and parent-inherited state, returning it
+   PARKED (thread not yet runnable) via *out_proc.  Callers must finish any
+   further setup (e.g. spawn_as uid override) and then call process_start().
+   Returns 0 on success, or a negative errno on failure. */
+static int64_t spawn_process(uint64_t path_virt, uint64_t argv_virt,
+                             int64_t stdin_fd_parent, int64_t stdout_fd_parent,
+                             struct process **out_proc)
 {
     /* Copy path from user space into a kernel buffer immediately, before any
        CR3 switches, so the string remains accessible throughout this function. */
@@ -454,9 +447,13 @@ static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
         }
     }
 
-    /* Write ABI initial stack into child's address space.
-       Switch to the child's CR3 so user virtual addresses are accessible.
-       Kernel half is identical (copied at vmm_space_create time). */
+    /* Write the ABI initial stack into the child's address space.  Switch to the
+       child's CR3 so its user virtual addresses are accessible (the kernel half
+       is identical, copied at vmm_space_create time).  Interrupts must be OFF for
+       the whole window: this manual CR3 switch does not update the parent
+       thread's saved cr3, so a timer preemption here would resume the parent on
+       the parent's CR3 and our writes would land in the wrong address space. */
+    __asm__ volatile("cli" ::: "memory");
     uint64_t old_cr3 = vmm_pml4_phys();
     vmm_space_switch(result.cr3);
 
@@ -489,10 +486,11 @@ static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
     *(uint64_t *)(uintptr_t)sp = (uint64_t)argc;
 
     vmm_space_switch(old_cr3);
+    __asm__ volatile("sti" ::: "memory");
 
     result.user_sp = sp;
     struct process *proc = process_create_from_result(&result);
-    if (!proc) return -1;
+    if (!proc) return -1;  /* address space leaks here only on OOM; acceptable */
 
     /* Store process name from the basename of path. */
     {
@@ -541,6 +539,19 @@ static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
                        fd_id(parent_fds, (int)stdout_fd_parent));
         }
     }
+    *out_proc = proc;
+    return 0;
+}
+
+/* Thin wrapper: spawn then make the child runnable once fully initialized. */
+static int64_t sys_spawn(uint64_t path_virt, uint64_t argv_virt,
+                         int64_t stdin_fd_parent, int64_t stdout_fd_parent)
+{
+    struct process *proc = NULL;
+    int64_t r = spawn_process(path_virt, argv_virt,
+                              stdin_fd_parent, stdout_fd_parent, &proc);
+    if (r < 0) return r;
+    process_start(proc);
     return (int64_t)proc->pid;
 }
 
@@ -593,15 +604,16 @@ static int64_t sys_spawn_as(uint64_t path_virt, uint64_t argv_virt,
     struct process *caller = ct ? (struct process *)ct->process : NULL;
     if (!caller || caller->cred.euid != 0) return -1; /* EPERM */
 
-    int64_t pid = sys_spawn(path_virt, argv_virt, -1, -1);
-    if (pid < 0) return pid;
+    /* Spawn parked, set the target credentials, THEN start — so the child never
+       runs as root before being dropped to the requested uid/gid. */
+    struct process *child = NULL;
+    int64_t r = spawn_process(path_virt, argv_virt, -1, -1, &child);
+    if (r < 0) return r;
 
-    struct process *child = process_find((uint32_t)pid);
-    if (child) {
-        child->cred.uid = child->cred.euid = child->cred.suid = (uint32_t)child_uid;
-        child->cred.gid = child->cred.egid = child->cred.sgid = (uint32_t)child_gid;
-    }
-    return pid;
+    child->cred.uid = child->cred.euid = child->cred.suid = (uint32_t)child_uid;
+    child->cred.gid = child->cred.egid = child->cred.sgid = (uint32_t)child_gid;
+    process_start(child);
+    return (int64_t)child->pid;
 }
 
 static int64_t sys_pipe(uint64_t pipefd_virt)
@@ -699,14 +711,14 @@ static int64_t sys_chdir(uint64_t path_virt)
 
 static int64_t sys_getcwd(uint64_t buf_virt, uint64_t size)
 {
+    if (size == 0) return -1;
     char kbuf[256];
-    uint32_t cap = (size < sizeof(kbuf)) ? (uint32_t)size : (uint32_t)sizeof(kbuf);
-    if (cap == 0) return -1;
-    if (vfs_getcwd(kbuf, cap) != 0) return -1;
+    if (vfs_getcwd(kbuf, sizeof(kbuf)) != 0) return -1;
     uint32_t len = (uint32_t)strlen(kbuf) + 1U; /* include NUL */
-    if (len > cap) len = cap;
+    /* Don't silently truncate: report ERANGE if the full path doesn't fit. */
+    if ((uint64_t)len > size) return -34; /* -ERANGE */
     if (!copy_to_user((void *)(uintptr_t)buf_virt, kbuf, len)) return -14;
-    return (int64_t)strlen(kbuf);
+    return (int64_t)(len - 1U);
 }
 
 /* ---- Socket syscalls ------------------------------------------------------- */

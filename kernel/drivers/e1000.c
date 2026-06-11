@@ -10,6 +10,7 @@
 #include "lib/string.h"
 #include "mem/pmm.h"
 #include "mem/vmm.h"
+#include "sync/spinlock.h"
 
 /* ---- e1000 register offsets ---------------------------------------------- */
 #define E1000_CTRL    0x0000U
@@ -153,21 +154,33 @@ static bool e1000_nic_send(nic_t *self, const void *data, uint16_t len)
     return false;
 }
 
+/* Serializes RX-ring consumption: the net poll thread and (during connect) the
+   TCP polling thread both call this, racing s_rx_tail and the RDT register. */
+static spinlock_t s_rx_lock = SPINLOCK_INIT;
+
 static uint16_t e1000_nic_recv(nic_t *self, void *buf, uint16_t max_len)
 {
     (void)self;
-    uint32_t idx = (e_read(E1000_RDH) + RX_RING_SIZE - 1) % RX_RING_SIZE;
+    uint64_t f = spinlock_acquire_irqsave(&s_rx_lock);
+
     /* Walk from our tail to head. */
     uint32_t tail = s_rx_tail;
-    if (tail == (e_read(E1000_RDH) % RX_RING_SIZE)) return 0;
+    if (tail == (e_read(E1000_RDH) % RX_RING_SIZE)) {
+        spinlock_release_irqrestore(&s_rx_lock, f);
+        return 0;
+    }
 
     rx_desc_t *d = &s_rx_ring[tail];
-    if (!(d->status & DESC_STATUS_DD)) return 0;
+    if (!(d->status & DESC_STATUS_DD)) {
+        spinlock_release_irqrestore(&s_rx_lock, f);
+        return 0;
+    }
     if (!(d->status & DESC_STATUS_EOP)) { /* drop multi-fragment packets */
         d->status = 0;
         d->addr   = s_rx_buf_phys[tail];
         s_rx_tail = (tail + 1) % RX_RING_SIZE;
         e_write(E1000_RDT, tail);
+        spinlock_release_irqrestore(&s_rx_lock, f);
         return 0;
     }
 
@@ -181,7 +194,7 @@ static uint16_t e1000_nic_recv(nic_t *self, void *buf, uint16_t max_len)
     s_rx_tail = (tail + 1) % RX_RING_SIZE;
     e_write(E1000_RDT, (s_rx_tail + RX_RING_SIZE - 1) % RX_RING_SIZE);
 
-    (void)idx;
+    spinlock_release_irqrestore(&s_rx_lock, f);
     return len;
 }
 

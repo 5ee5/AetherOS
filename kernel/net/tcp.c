@@ -9,6 +9,7 @@
 
 #include "lib/string.h"
 #include "mem/heap.h"
+#include "sync/spinlock.h"
 
 /* ---- TCP header ---------------------------------------------------------- */
 
@@ -63,12 +64,28 @@ struct tcp_conn {
 
 static struct tcp_conn s_conns[MAX_CONNS];
 static uint16_t        s_next_port = 49152;
+static spinlock_t      s_tcp_lock = SPINLOCK_INIT;
 
 static struct tcp_conn *alloc_conn(void)
 {
-    for (int i = 0; i < MAX_CONNS; ++i)
-        if (!s_conns[i].in_use) { s_conns[i].in_use = true; return &s_conns[i]; }
+    uint64_t f = spinlock_acquire_irqsave(&s_tcp_lock);
+    for (int i = 0; i < MAX_CONNS; ++i) {
+        if (!s_conns[i].in_use) {
+            s_conns[i].in_use = true;
+            spinlock_release_irqrestore(&s_tcp_lock, f);
+            return &s_conns[i];
+        }
+    }
+    spinlock_release_irqrestore(&s_tcp_lock, f);
     return NULL;
+}
+
+static uint16_t alloc_port(void)
+{
+    uint64_t f = spinlock_acquire_irqsave(&s_tcp_lock);
+    uint16_t p = s_next_port++;
+    spinlock_release_irqrestore(&s_tcp_lock, f);
+    return p;
 }
 
 static void rxbuf_push(struct tcp_conn *c, const uint8_t *data, uint16_t len)
@@ -96,7 +113,9 @@ static uint16_t rxbuf_pop(struct tcp_conn *c, uint8_t *buf, uint16_t max)
 static bool tcp_send_seg(struct tcp_conn *c, uint8_t flags,
                           const void *data, uint16_t dlen)
 {
-    static uint8_t buf[1460 + sizeof(tcp_hdr_t)];
+    /* Local (not static) so concurrent senders on different connections/CPUs
+       don't interleave into a shared buffer and emit malformed segments. */
+    uint8_t buf[1460 + sizeof(tcp_hdr_t)];
     if (dlen + sizeof(tcp_hdr_t) > sizeof(buf)) return false;
 
     tcp_hdr_t *hdr = (tcp_hdr_t *)buf;
@@ -146,7 +165,7 @@ tcp_conn_t *tcp_connect(uint32_t dst_ip, uint16_t dst_port)
     c->state      = TCP_CLOSED;
     c->dst_ip     = dst_ip;
     c->dst_port   = dst_port;
-    c->src_port   = s_next_port++;
+    c->src_port   = alloc_port();
     c->snd_seq    = 0x12345678U;
     c->snd_una    = c->snd_seq;
     c->rcv_nxt    = 0;

@@ -151,7 +151,10 @@ struct thread *thread_create_user(uint64_t entry_rip, uint64_t user_rsp, uint64_
 
 	t->rsp = (uint64_t)(uintptr_t)frame;
 
-	sched_add(t);
+	/* NOT added to the run queue here.  The owning process must finish
+	   initializing credentials/fds before making the thread runnable via
+	   process_start(); otherwise the child can be scheduled on another CPU
+	   and run with stale (root) credentials and no inherited fds. */
 	return t;
 }
 

@@ -34,7 +34,8 @@ struct thread {
 /* Create a new kernel thread. Added to run queue automatically. */
 struct thread *thread_create(thread_fn_t fn, void *arg);
 
-/* Create a user-mode thread. Added to run queue automatically.
+/* Create a user-mode thread. NOT added to the run queue — the owning process
+   makes it runnable via process_start() once credentials/fds are initialized.
    entry_rip and user_rsp are the ring-3 RIP/RSP; cr3 is the process PML4 phys. */
 struct thread *thread_create_user(uint64_t entry_rip, uint64_t user_rsp, uint64_t cr3);
 

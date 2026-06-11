@@ -1,6 +1,7 @@
 #include "core/serial.h"
 
 #include "arch/x86_64/io.h"
+#include "sync/spinlock.h"
 
 #define COM1 0x3f8U
 
@@ -9,6 +10,8 @@
 static char     s_log_buf[LOG_BUF_SZ];
 static uint32_t s_log_write;
 static uint32_t s_log_read;
+/* Guards the log ring indices against concurrent writers/readers (any CPU). */
+static spinlock_t s_log_lock = SPINLOCK_INIT;
 
 static int serial_ready;
 
@@ -54,23 +57,28 @@ void serial_write_char(char c)
 	}
 	outb(COM1, (uint8_t)c);
 
-	/* Feed into log ring buffer (skip \r). */
+	/* Feed into log ring buffer (skip \r). Lock only the index update — the
+	   tiny critical section keeps the serial-in-panic deadlock window minimal. */
 	if (c != '\r') {
+		uint64_t f = spinlock_acquire_irqsave(&s_log_lock);
 		s_log_buf[s_log_write % LOG_BUF_SZ] = c;
 		s_log_write++;
 		/* If we lapped the read pointer, advance it to drop oldest data. */
 		if (s_log_write - s_log_read > LOG_BUF_SZ)
 			s_log_read = s_log_write - LOG_BUF_SZ;
+		spinlock_release_irqrestore(&s_log_lock, f);
 	}
 }
 
 uint32_t serial_log_read(char *buf, uint32_t size)
 {
+	uint64_t f = spinlock_acquire_irqsave(&s_log_lock);
 	uint32_t avail = s_log_write - s_log_read;
 	if (avail > size) avail = size;
 	for (uint32_t i = 0; i < avail; i++)
 		buf[i] = s_log_buf[(s_log_read + i) % LOG_BUF_SZ];
 	s_log_read += avail;
+	spinlock_release_irqrestore(&s_log_lock, f);
 	return avail;
 }
 

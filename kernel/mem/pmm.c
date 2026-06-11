@@ -104,6 +104,14 @@ void pmm_init(const struct os_boot_info *boot_info)
 	mark_range_used(boot_info->page_table_root,
 		boot_info->page_table_root + OS_PAGE_SIZE);
 
+	/* Reserve the bootloader's still-live allocations (page tables, boot_info,
+	   UEFI memory map).  Without this the PMM reclaims the kernel's own active
+	   page tables as free RAM and later corrupts them under memory pressure. */
+	if (boot_info->loader_reserved_end > boot_info->loader_reserved_start) {
+		mark_range_used(boot_info->loader_reserved_start,
+			boot_info->loader_reserved_end);
+	}
+
 	serial_write("pmm: total_pages=");
 	serial_write_dec(pmm_total);
 	serial_write(" free_pages=");
