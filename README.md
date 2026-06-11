@@ -1,6 +1,6 @@
 # AetherOS
 
-A hobby x86-64 operating system written from scratch in C and NASM assembly. Boots via UEFI, runs on real hardware and QEMU, and supports multiple CPU cores, preemptive multitasking, per-process address spaces, a writable ext2 filesystem, an in-kernel TCP/IP stack, multi-user login with file permissions, and an interactive shell with pipes, job control, and 30+ real user-space programs.
+A hobby x86-64 operating system written from scratch in C and NASM assembly. Boots via UEFI, runs on real hardware and QEMU, and supports multiple CPU cores, preemptive multitasking, per-process address spaces, a writable ext2 filesystem, an in-kernel TCP/IP stack, multi-user login with file permissions, and an interactive shell with pipes, background jobs, and 30+ real user-space programs.
 
 ## What it does
 
@@ -140,8 +140,8 @@ user/
                  chmod, chown), users (login, sudo, passwd, useradd,
                  userdel, whoami, id), net (wget), sysinfo (ps, df, free,
                  uname), power (poweroff, reboot, kill, sleep, pwd)
-  shell/         interactive shell (NASM)
-  hello/         minimal hello-world ELF (NASM)
+  shell/         interactive shell (C, tinylibc)
+  hello/         minimal hello-world program (C, tinylibc)
 include/os/      shared bootloader↔kernel headers (bootinfo, ELF64)
 scripts/         build helpers (QEMU, ISO, disk image, dep check)
 ```
