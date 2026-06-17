@@ -1,37 +1,48 @@
 #!/usr/bin/env bash
 # Create build/usb.img: 64 MiB bootable USB image.
 #
-# Layout:
-#   GPT idx 0 (LBA 2048–67583):   ext2 data partition  — kernel mounts parts[0]
-#   GPT idx 1 (LBA 67584–end):    FAT32 ESP            — UEFI firmware finds by type GUID
+# Layout (ESP FIRST for real-firmware compatibility):
+#   GPT idx 0 (LBA 2048–67583):   FAT16 ESP            — UEFI firmware boots \EFI\BOOT\BOOTX64.EFI
+#   GPT idx 1 (LBA 67584–end):    ext2 data partition  — kernel mounts the ext2 partition by content
 #
+# Rationale: many real UEFI firmwares only honour an ESP that is the first GPT
+# partition (or scan removable media quirkily), unlike OVMF which finds it by
+# type GUID anywhere. The ESP is FAT16 — UEFI permits FAT12/16/32 on removable
+# media, and FAT16 is reliable at this ~32 MiB size where forced FAT32 is
+# borderline/non-conformant and gets rejected by strict firmware FAT drivers.
 set -euo pipefail
 
 IMG=build/usb.img
 ESP_IMG=build/esp_fat.img
 
-EXT2_START=2048
-EXT2_END=67583
-ESP_START=67584
+ESP_START=2048
+ESP_END=67583
+EXT2_START=67584
 TOTAL_SECTORS=131072   # 64 MiB
 
 EXT2_OFFSET=$(( EXT2_START * 512 ))
 ESP_OFFSET=$(( ESP_START * 512 ))
-ESP_SECTORS=$(( TOTAL_SECTORS - ESP_START ))
+ESP_SECTORS=$(( ESP_END - ESP_START + 1 ))
+
+# GPT reserves the last 33 sectors for the backup partition table (+1 for the
+# backup header). Size the ext2 filesystem to stay clear of it, otherwise
+# mkfs.ext2 (no explicit size) extends to end-of-file and corrupts the backup GPT.
+EXT2_LAST=$(( TOTAL_SECTORS - 34 ))               # last LBA usable by partition 2
+EXT2_BLOCKS=$(( (EXT2_LAST - EXT2_START + 1) * 512 / 1024 ))
 
 mkdir -p build
 
 # 64 MiB raw image
 dd if=/dev/zero of="$IMG" bs=512 count=$TOTAL_SECTORS status=none
 
-# GPT: ext2 data first, FAT32 ESP second (firmware finds ESP by type GUID)
+# GPT: FAT ESP first (firmware boots it), ext2 data second
 parted -s "$IMG" mklabel gpt \
-    mkpart data  ext2  "${EXT2_START}s" "${EXT2_END}s" \
-    mkpart ESP   fat32 "${ESP_START}s"  100% \
-    set 2 esp on
+    mkpart ESP   fat16 "${ESP_START}s"  "${ESP_END}s" \
+    mkpart data  ext2  "${EXT2_START}s" 100% \
+    set 1 esp on
 
 # Write ext2 filesystem into partition 1
-mkfs.ext2 -F -b 1024 -E offset="${EXT2_OFFSET}" "$IMG" >/dev/null 2>&1
+mkfs.ext2 -F -b 1024 -E offset="${EXT2_OFFSET}" "$IMG" "${EXT2_BLOCKS}" >/dev/null 2>&1
 
 # Populate ext2: /hello.txt and /bin/*
 TMP=$(mktemp)
@@ -68,9 +79,9 @@ rm -f "$TMP_PASSWD"
 debugfs -w "$IMG?offset=${EXT2_OFFSET}" -R "mkdir root" 2>/dev/null
 debugfs -w "$IMG?offset=${EXT2_OFFSET}" -R "mkdir home" 2>/dev/null
 
-# Build temporary FAT32 ESP image
+# Build temporary FAT16 ESP image (deterministic FAT16 via dosfstools)
 dd if=/dev/zero of="$ESP_IMG" bs=512 count=$ESP_SECTORS status=none
-mformat -i "$ESP_IMG" -F -h 255 -s 63 ::
+mkfs.fat -F 16 -n ESP "$ESP_IMG" >/dev/null
 mmd -i "$ESP_IMG" ::/EFI ::/EFI/BOOT ::/EFI/OS
 mcopy -i "$ESP_IMG" build/BOOTX64.EFI ::/EFI/BOOT/BOOTX64.EFI
 mcopy -i "$ESP_IMG" build/kernel/kernel.elf ::/EFI/OS/KERNEL.ELF
@@ -79,5 +90,5 @@ mcopy -i "$ESP_IMG" build/kernel/kernel.elf ::/EFI/OS/KERNEL.ELF
 dd if="$ESP_IMG" of="$IMG" bs=512 seek=$ESP_START conv=notrunc status=none
 rm -f "$ESP_IMG"
 
-echo "usb: created $IMG (64 MiB, ext2 + FAT32 ESP)"
+echo "usb: created $IMG (64 MiB, FAT16 ESP + ext2)"
 echo "     flash: dd if=$IMG of=/dev/sdX bs=4M status=progress oflag=sync"

@@ -90,6 +90,7 @@ int gpt_read(blkdev_t *dev, gpt_partition_t *parts, int max)
 
         parts[found].first_lba = e->first_lba;
         parts[found].last_lba  = e->last_lba;
+        memcpy(parts[found].type_guid, e->type_guid, 16);
         ++found;
     }
 

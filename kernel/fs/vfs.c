@@ -137,7 +137,15 @@ bool vfs_init(void)
         return false;
     }
 
-    /* Find first GPT partition. */
+    /* Enumerate GPT partitions. The data/root partition is located by content
+       (a valid ext2 superblock), not by index: the USB image places the FAT ESP
+       first so firmware boots reliably, so partition 0 is not necessarily ext2.
+       The EFI System Partition type GUID is skipped outright. */
+    static const uint8_t esp_type_guid[16] = {
+        0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11,
+        0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b,
+    };
+
     gpt_partition_t parts[4];
     int np = gpt_read(&s_blkdev, parts, 4);
     if (np == 0) {
@@ -145,14 +153,19 @@ bool vfs_init(void)
         return false;
     }
 
-    s_root_fs = ext2_mount(&s_blkdev, parts[0].first_lba);
-    if (!s_root_fs) {
-        serial_write("vfs: ext2 mount failed\n");
-        return false;
+    for (int i = 0; i < np; ++i) {
+        if (memcmp(parts[i].type_guid, esp_type_guid, 16) == 0) continue;
+        s_root_fs = ext2_mount(&s_blkdev, parts[i].first_lba);
+        if (s_root_fs) {
+            serial_write("vfs: mounted ext2 on partition ");
+            serial_write_dec((uint64_t)i);
+            serial_write("\n");
+            return true;
+        }
     }
 
-    serial_write("vfs: mounted ext2 on partition 0\n");
-    return true;
+    serial_write("vfs: ext2 mount failed\n");
+    return false;
 }
 
 /* ---- Path resolution ------------------------------------------------------ */

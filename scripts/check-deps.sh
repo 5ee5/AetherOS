@@ -27,6 +27,7 @@ optional xorriso
 optional mformat
 optional mcopy
 optional mmd
+optional mkfs.fat
 
 if [ "$missing" -ne 0 ]; then
 	exit 1

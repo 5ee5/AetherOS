@@ -9,6 +9,7 @@
 typedef struct {
     uint64_t first_lba;
     uint64_t last_lba;
+    uint8_t  type_guid[16];
 } gpt_partition_t;
 
 /* Read the GPT from `dev` and fill `parts[0..max-1]`.
