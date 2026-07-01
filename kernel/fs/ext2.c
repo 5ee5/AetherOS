@@ -599,6 +599,13 @@ ext2_fs_t *ext2_mount(blkdev_t *dev, uint64_t part_offset_lba)
     return fs;
 }
 
+void ext2_unmount(ext2_fs_t *fs)
+{
+    if (!fs) return;
+    kfree(fs->scratch);
+    kfree(fs);
+}
+
 /* Walk a directory block to find `name` (length `name_len`).
    Returns inode number or 0 if not found. */
 static uint32_t dir_find_in_block(const uint8_t *block, uint32_t block_size,

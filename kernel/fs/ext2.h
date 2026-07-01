@@ -13,6 +13,10 @@ typedef struct ext2_fs ext2_fs_t;
    Returns non-NULL on success; caller must not free. */
 ext2_fs_t *ext2_mount(blkdev_t *dev, uint64_t part_offset_lba);
 
+/* Release a mounted filesystem handle (frees the scratch buffer + struct).
+   Used to discard a trial mount that turned out not to be the root. */
+void ext2_unmount(ext2_fs_t *fs);
+
 /* Look up `path` (absolute, e.g. "/hello.txt") in the filesystem.
    On success fills `inode_out` with the inode number and returns true. */
 bool ext2_lookup(ext2_fs_t *fs, const char *path, uint32_t *inode_out);

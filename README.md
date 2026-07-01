@@ -14,7 +14,7 @@ A hobby x86-64 operating system written from scratch in C and NASM assembly. Boo
 
 **User-space processes** — ELF64 executables are loaded into per-process address spaces (ring 3). System calls go through `SYSCALL`/`SYSRET` with `swapgs` for per-CPU kernel stack switching. All user-pointer access goes through fault-recovering `copy_to/from_user` helpers, so a bad pointer returns `-EFAULT` instead of faulting the kernel. Syscalls span the file/process/socket surface: `read`, `write`, `open` (O_CREAT/O_TRUNC/O_APPEND), `close`, `stat`, `pipe`, `creat`, `mkdir`, `unlink`, `rename`, `chdir`, `getcwd`, `listdir`, `chmod`, `chown`, `exit`, `waitpid`, `getpid`, `kill`, `sleep`, `spawn`, `spawn_as`, `ps`, `meminfo`, `diskinfo`, `reboot`, the credential calls (`getuid`/`getgid`/`geteuid`/`getegid`/`setuid`/`setgid`/`seteuid`/`setegid`), and the network calls (`socket`, `connect`, `send`, `recv`, `dns_resolve`).
 
-**Writable ext2 filesystem** — full read/write ext2 support including block/inode allocation, directory mutation (`create`, `mkdir`, `unlink`), and file truncation. The VFS layer exposes all operations to user processes. Data is persisted in a GPT disk image via an AHCI driver.
+**Writable ext2 filesystem** — full read/write ext2 support including block/inode allocation, directory mutation (`create`, `mkdir`, `unlink`), and file truncation. The VFS layer exposes all operations to user processes. Data is persisted in a GPT disk image over AHCI (SATA), NVMe, or **USB mass storage** (xHCI → Bulk-Only Transport → SCSI); the root partition is located by content across all block devices, so the OS boots its full filesystem from a USB stick on real hardware.
 
 **Multi-user login & permissions** — boots to a `login` prompt that authenticates against `/etc/passwd` and starts the shell as the logged-in user. Processes carry real/effective/saved UID & GID credentials; the ext2 layer enforces rwx permission bits, and the setuid bit on an executable elevates privilege on exec. `sudo`, `passwd`, `useradd`, and `userdel` manage users and run commands as root.
 
@@ -35,7 +35,7 @@ A hobby x86-64 operating system written from scratch in C and NASM assembly. Boo
 | Memory | Bitmap PMM, 4-level VMM, first-fit heap with coalescing |
 | Scheduling | Preemptive round-robin, APIC timer ~1 kHz |
 | Processes | Per-process PML4, ring-3 user mode, SYSCALL/SYSRET |
-| Filesystem | GPT + ext2 (read+write) over AHCI (SATA), basic NVMe, VFS abstraction |
+| Filesystem | GPT + ext2 (read+write) over AHCI (SATA), NVMe, or USB mass storage (xHCI/BOT/SCSI); content-based root mount; VFS abstraction |
 | Networking | e1000 NIC, ARP, DHCP, IPv4, ICMP, UDP, DNS, TCP — socket syscalls exposed to userland |
 | GUI | Framebuffer desktop, 8×16 font, windows, live kernel log |
 | Shell | built-ins + pipes (4 stages), `&` background jobs, Ctrl+C, `>`, history, ELF programs |
@@ -131,7 +131,7 @@ kernel/
   gui/           framebuffer, font, windows, desktop
   syscall/       syscall dispatch
   security/      process credentials (real/effective/saved UID & GID)
-  drivers/       AHCI, NVMe, PCI, PS/2 keyboard
+  drivers/       AHCI, NVMe, xHCI + USB mass storage, PCI, PS/2 keyboard
   test/          in-kernel test suites (8 suites)
 user/
   libc/          tinylibc (crt0, printf, free-list malloc, syscall wrappers)

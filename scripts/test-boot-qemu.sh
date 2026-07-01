@@ -47,7 +47,13 @@ mkdir -p "$(dirname "$LOG")"
 
 DISK_ARGS=""
 if [ -f "build/disk.img" ]; then
-	DISK_ARGS="-device ich9-ahci,id=ahci -drive id=hd0,if=none,format=raw,file=build/disk.img -device ide-hd,bus=ahci.0,drive=hd0"
+	if [ "${BOOT_TEST_USB:-0}" = "1" ]; then
+		# Attach the data disk ONLY as a USB mass-storage device behind an
+		# emulated xHCI controller, forcing the root mount through the USB stack.
+		DISK_ARGS="-device qemu-xhci,id=xhci -drive id=usb,if=none,format=raw,file=build/disk.img -device usb-storage,bus=xhci.0,drive=usb"
+	else
+		DISK_ARGS="-device ich9-ahci,id=ahci -drive id=hd0,if=none,format=raw,file=build/disk.img -device ide-hd,bus=ahci.0,drive=hd0"
+	fi
 fi
 
 set +e
@@ -83,6 +89,15 @@ fi
 if ! grep -q "ktest:" "$LOG"; then
 	cat "$LOG"
 	echo "boot smoke test failed: no ktest output found" >&2
+	exit 1
+fi
+
+# In USB mode the data disk is attached ONLY over USB, so the root must have
+# been mounted through the xHCI/BOT/SCSI stack — otherwise it silently fell
+# back to the embedded shell and the test would be meaningless.
+if [ "${BOOT_TEST_USB:-0}" = "1" ] && ! grep -q "vfs: mounted ext2 root on usb" "$LOG"; then
+	cat "$LOG"
+	echo "boot smoke test failed: USB root was not mounted via the USB stack" >&2
 	exit 1
 fi
 

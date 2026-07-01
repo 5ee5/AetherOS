@@ -8,6 +8,7 @@
 #include "core/serial.h"
 #include "drivers/ahci.h"
 #include "drivers/nvme.h"
+#include "drivers/usb_msc.h"
 #include "fs/ext2.h"
 #include "lib/string.h"
 #include "mem/heap.h"
@@ -108,63 +109,122 @@ static bool nvme_blkdev_write(blkdev_t *self, uint64_t lba, uint32_t count, cons
     return true;
 }
 
+/* ---- USB mass-storage-backed block device -------------------------------- */
+
+static bool usb_blkdev_read(blkdev_t *self, uint64_t lba, uint32_t count, void *buf)
+{
+    (void)self;
+    uint8_t *p = (uint8_t *)buf;
+    while (count > 0) {
+        uint16_t batch = (count > 8) ? 8 : (uint16_t)count;
+        if (!usb_msc_read_sectors(lba, batch, p)) return false;
+        p     += (uint64_t)batch * 512;
+        lba   += batch;
+        count -= batch;
+    }
+    return true;
+}
+
+static bool usb_blkdev_write(blkdev_t *self, uint64_t lba, uint32_t count, const void *buf)
+{
+    (void)self;
+    const uint8_t *p = (const uint8_t *)buf;
+    while (count > 0) {
+        uint16_t batch = (count > 8) ? 8 : (uint16_t)count;
+        if (!usb_msc_write_sectors(lba, batch, p)) return false;
+        p     += (uint64_t)batch * 512;
+        lba   += batch;
+        count -= batch;
+    }
+    return true;
+}
+
 /* ---- State ---------------------------------------------------------------- */
 
 static ext2_fs_t      *s_root_fs;
-static blkdev_t        s_blkdev;
+/* Persistent block-device objects (ext2 keeps a pointer into the chosen one, so
+   these must outlive vfs_init). Index: 0=AHCI, 1=NVMe, 2=USB. */
+static blkdev_t        s_blkdevs[3];
 static ahci_blkdev_priv_t s_blkpriv;
 
 /* ---- Public API ----------------------------------------------------------- */
 
-bool vfs_init(void)
+/* A mounted ext2 is "our" root only if it carries the OS layout — otherwise we
+   could latch onto an unrelated ext2/ext4 disk (ext4 shares the 0xEF53 magic)
+   and, since this kernel writes ext2, corrupt it. Require /bin/login or the
+   password file. */
+static bool fs_is_our_root(ext2_fs_t *fs)
 {
-    int disk = ahci_first_disk();
-    if (disk >= 0) {
-        s_blkpriv.port        = (uint8_t)disk;
-        s_blkdev.sector_size  = 512;
-        s_blkdev.sector_count = 0;
-        s_blkdev.read         = ahci_blkdev_read;
-        s_blkdev.write        = ahci_blkdev_write;
-        s_blkdev.priv         = &s_blkpriv;
-    } else if (nvme_first_ns() >= 0) {
-        s_blkdev.sector_size  = 512;
-        s_blkdev.sector_count = 0;
-        s_blkdev.read         = nvme_blkdev_read;
-        s_blkdev.write        = nvme_blkdev_write;
-        s_blkdev.priv         = NULL;
-    } else {
-        serial_write("vfs: no disk\n");
-        return false;
-    }
+    uint32_t ino;
+    return ext2_lookup(fs, "/bin/login", &ino) ||
+           ext2_lookup(fs, "/etc/passwd", &ino);
+}
 
-    /* Enumerate GPT partitions. The data/root partition is located by content
-       (a valid ext2 superblock), not by index: the USB image places the FAT ESP
-       first so firmware boots reliably, so partition 0 is not necessarily ext2.
-       The EFI System Partition type GUID is skipped outright. */
+/* Try every non-ESP GPT partition on `dev`; mount the first that is our root.
+   Rejected trial mounts are unmounted so they don't leak. Returns true if
+   s_root_fs was set. `label` is only for the log line. */
+static bool try_mount_root(blkdev_t *dev, const char *label)
+{
     static const uint8_t esp_type_guid[16] = {
         0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11,
         0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b,
     };
-
     gpt_partition_t parts[4];
-    int np = gpt_read(&s_blkdev, parts, 4);
-    if (np == 0) {
-        serial_write("vfs: no GPT partitions\n");
-        return false;
-    }
-
+    int np = gpt_read(dev, parts, 4);
     for (int i = 0; i < np; ++i) {
         if (memcmp(parts[i].type_guid, esp_type_guid, 16) == 0) continue;
-        s_root_fs = ext2_mount(&s_blkdev, parts[i].first_lba);
-        if (s_root_fs) {
-            serial_write("vfs: mounted ext2 on partition ");
+        ext2_fs_t *fs = ext2_mount(dev, parts[i].first_lba);
+        if (!fs) continue;
+        if (fs_is_our_root(fs)) {
+            s_root_fs = fs;
+            serial_write("vfs: mounted ext2 root on ");
+            serial_write(label);
+            serial_write(" partition ");
             serial_write_dec((uint64_t)i);
             serial_write("\n");
             return true;
         }
+        ext2_unmount(fs);   /* not our root — discard */
+    }
+    return false;
+}
+
+bool vfs_init(void)
+{
+    /* Assemble the available block devices, then scan each for our root. USB is
+       tried first so a machine that also has an internal disk still boots from
+       the USB stick it was launched from. */
+    int order = 0;
+    struct { blkdev_t *dev; const char *label; } cands[3];
+
+    if (usb_msc_first() >= 0) {
+        blkdev_t *d = &s_blkdevs[2];
+        d->sector_size = 512; d->sector_count = 0;
+        d->read = usb_blkdev_read; d->write = usb_blkdev_write; d->priv = NULL;
+        cands[order].dev = d; cands[order].label = "usb"; order++;
+    }
+    int disk = ahci_first_disk();
+    if (disk >= 0) {
+        s_blkpriv.port = (uint8_t)disk;
+        blkdev_t *d = &s_blkdevs[0];
+        d->sector_size = 512; d->sector_count = 0;
+        d->read = ahci_blkdev_read; d->write = ahci_blkdev_write; d->priv = &s_blkpriv;
+        cands[order].dev = d; cands[order].label = "ahci"; order++;
+    }
+    if (nvme_first_ns() >= 0) {
+        blkdev_t *d = &s_blkdevs[1];
+        d->sector_size = 512; d->sector_count = 0;
+        d->read = nvme_blkdev_read; d->write = nvme_blkdev_write; d->priv = NULL;
+        cands[order].dev = d; cands[order].label = "nvme"; order++;
     }
 
-    serial_write("vfs: ext2 mount failed\n");
+    if (order == 0) { serial_write("vfs: no disk\n"); return false; }
+
+    for (int i = 0; i < order; ++i)
+        if (try_mount_root(cands[i].dev, cands[i].label))
+            return true;
+
+    serial_write("vfs: no ext2 root found\n");
     return false;
 }
 
