@@ -15,5 +15,9 @@ jobs:
         run: ./scripts/check-deps.sh
       - name: Build
         run: make all
-      - name: Boot smoke test
+      - name: Boot smoke test (AHCI)
         run: BOOT_TEST_TIMEOUT=45s make test
+      - name: Boot smoke test (USB / xHCI)
+        # Attaches the data disk only over USB, forcing the root mount through
+        # the xHCI + Bulk-Only Transport + SCSI stack (asserts the USB mount).
+        run: BOOT_TEST_USB=1 BOOT_TEST_TIMEOUT=45s make boot-test
