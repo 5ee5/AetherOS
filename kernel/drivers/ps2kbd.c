@@ -7,6 +7,7 @@
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/ioapic.h"
 #include "arch/x86_64/apic.h"
+#include "core/input.h"
 #include "core/serial.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
@@ -79,17 +80,8 @@ void ps2kbd_handler(void)
     if (c >= 'a' && c <= 'z' && s_caps) c = (char)(c - 32);
     if (c == 0) goto eoi;
 
-    uint8_t next = (uint8_t)((s_tail + 1) % KBD_BUF_SIZE);
-    if (next != s_head) {
-        s_buf[s_tail] = c;
-        s_tail = next;
-    }
-    /* Wake any thread blocked in sys_read(fd=0). */
-    if (s_stdin_waiter) {
-        struct thread *w = s_stdin_waiter;
-        s_stdin_waiter = NULL;
-        sched_wake(w);
-    }
+    /* Feed the shared console input ring that sys_read(fd=0) drains. */
+    input_push(c);
 eoi:
     lapic_eoi();
 }

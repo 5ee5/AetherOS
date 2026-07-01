@@ -42,7 +42,7 @@ A hobby x86-64 operating system written from scratch in C and NASM assembly. Boo
 | Userland | 33 programs via tinylibc (coreutils, users, net, sysinfo — see below) |
 | Sync | Spinlocks (incl. IRQ-safe), mutexes with wait queues; SMP-safe heap/PMM/VFS/sockets/pipes |
 | ACPI | RSDP → RSDT/XSDT → MADT parsing for LAPIC/IOAPIC discovery; ACPI poweroff/reboot |
-| Input | PS/2 keyboard driver with IRQ-driven scancode handling |
+| Input | PS/2 keyboard (IRQ-driven) and USB HID keyboard (xHCI, boot protocol); merged into one console so the shell reads either |
 | Security | Real/effective/**saved** UID & GID, ext2 permission enforcement, setuid-on-exec, fault-recovering `copy_to/from_user` |
 | Multi-user | `login` against `/etc/passwd`, `sudo`/`passwd`/`useradd`/`userdel`, per-user shells |
 
@@ -131,7 +131,8 @@ kernel/
   gui/           framebuffer, font, windows, desktop
   syscall/       syscall dispatch
   security/      process credentials (real/effective/saved UID & GID)
-  drivers/       AHCI, NVMe, xHCI + USB mass storage, PCI, PS/2 keyboard
+  drivers/       AHCI, NVMe, xHCI + USB mass storage + USB HID keyboard,
+                 PCI, PS/2 keyboard
   test/          in-kernel test suites (8 suites)
 user/
   libc/          tinylibc (crt0, printf, free-list malloc, syscall wrappers)

@@ -43,6 +43,7 @@ static uint32_t  s_tag = 1;
 
 static uint64_t  s_sector_count;
 static bool      s_ready;
+static int       s_dev = -1;   /* xHCI device handle for the MSC device */
 static spinlock_t s_lock = SPINLOCK_INIT;
 
 /* Run one BOT command. `data_phys` (direct-mapped) may be 0 for no data phase.
@@ -61,19 +62,19 @@ static bool bot_command(const uint8_t *cdb, uint8_t cdb_len,
     memcpy(cbw->cb, cdb, cdb_len);
 
     /* CBW out (31 bytes). */
-    if (xhci_bulk_out(s_scratch_phys, 31) < 0) return false;
+    if (xhci_bulk_out(s_dev, s_scratch_phys, 31) < 0) return false;
 
     /* Data phase. */
     if (data_len && data_phys) {
-        int n = data_in ? xhci_bulk_in(data_phys, data_len)
-                        : xhci_bulk_out(data_phys, data_len);
+        int n = data_in ? xhci_bulk_in(s_dev, data_phys, data_len)
+                        : xhci_bulk_out(s_dev, data_phys, data_len);
         if (n < 0) return false;
     }
 
     /* CSW in (13 bytes). */
     csw_t *csw = (csw_t *)(s_scratch + 64);
     memset(csw, 0, sizeof(*csw));
-    if (xhci_bulk_in(s_scratch_phys + 64, 13) < 0) return false;
+    if (xhci_bulk_in(s_dev, s_scratch_phys + 64, 13) < 0) return false;
     if (csw->signature != CSW_SIG) return false;
     return csw->status == 0;
 }
@@ -139,7 +140,11 @@ int usb_msc_first(void){ return s_ready ? 0 : -1; }
 
 bool usb_init(void)
 {
-    if (!xhci_init() || !xhci_msc_present()) return false;
+    /* Bring up the controller + enumerate all devices once; find the MSC one
+       (class 0x08, subclass 0x06 SCSI, protocol 0x50 Bulk-Only). */
+    xhci_init();
+    s_dev = xhci_find_device(0x08, 0x06, 0x50);
+    if (s_dev < 0) return false;
 
     uint64_t sp = pmm_alloc_page();
     if (sp == PMM_ALLOC_FAILED) return false;

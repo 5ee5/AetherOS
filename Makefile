@@ -33,10 +33,12 @@ KERNEL_C_SRCS := \
 	kernel/core/fb.c \
 	kernel/core/panic.c \
 	kernel/core/serial.c \
+	kernel/core/input.c \
 	kernel/drivers/ahci.c \
 	kernel/drivers/nvme.c \
 	kernel/drivers/xhci.c \
 	kernel/drivers/usb_msc.c \
+	kernel/drivers/usb_hid.c \
 	kernel/drivers/e1000.c \
 	kernel/drivers/pci.c \
 	kernel/drivers/ps2kbd.c \

@@ -49,8 +49,9 @@ DISK_ARGS=""
 if [ -f "build/disk.img" ]; then
 	if [ "${BOOT_TEST_USB:-0}" = "1" ]; then
 		# Attach the data disk ONLY as a USB mass-storage device behind an
-		# emulated xHCI controller, forcing the root mount through the USB stack.
-		DISK_ARGS="-device qemu-xhci,id=xhci -drive id=usb,if=none,format=raw,file=build/disk.img -device usb-storage,bus=xhci.0,drive=usb"
+		# emulated xHCI controller (forces the root mount through the USB stack),
+		# plus a USB HID keyboard so the multi-device path + HID driver run.
+		DISK_ARGS="-device qemu-xhci,id=xhci -drive id=usb,if=none,format=raw,file=build/disk.img -device usb-storage,bus=xhci.0,drive=usb -device usb-kbd,bus=xhci.0"
 	else
 		DISK_ARGS="-device ich9-ahci,id=ahci -drive id=hd0,if=none,format=raw,file=build/disk.img -device ide-hd,bus=ahci.0,drive=hd0"
 	fi
@@ -98,6 +99,14 @@ fi
 if [ "${BOOT_TEST_USB:-0}" = "1" ] && ! grep -q "vfs: mounted ext2 root on usb" "$LOG"; then
 	cat "$LOG"
 	echo "boot smoke test failed: USB root was not mounted via the USB stack" >&2
+	exit 1
+fi
+
+# USB mode also attaches a USB HID keyboard: assert it enumerated alongside the
+# storage device (proves multi-device xHCI + the HID driver).
+if [ "${BOOT_TEST_USB:-0}" = "1" ] && ! grep -q "usb-hid: keyboard ready" "$LOG"; then
+	cat "$LOG"
+	echo "boot smoke test failed: USB HID keyboard did not enumerate" >&2
 	exit 1
 fi
 

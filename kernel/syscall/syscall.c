@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "acpi/acpi.h"
+#include "core/input.h"
 #include "core/serial.h"
 #include "exec/elf.h"
 #include "fs/vfs.h"
@@ -224,7 +225,11 @@ static int64_t sys_read_stdin(void *buf, uint32_t count)
     uint32_t n = 0;
     while (n < count) {
         __asm__ volatile("sti" ::: "memory");   /* allow timer IRQ so int $0x20 yields */
+        /* Console input merges serial (COM1) and any keyboard (PS/2 or USB HID,
+           both feeding the shared input ring), so the shell works whether the
+           machine has a serial port or only a USB keyboard. */
         char c = serial_read_char();
+        if (!c) c = input_getchar();
         if (!c) {
             __asm__ volatile("int $0x20" ::: "memory");  /* yield, stay READY */
             continue;
@@ -366,8 +371,9 @@ static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
     struct process *target = process_find((uint32_t)pid);
     if (!target) return -10;   /* ECHILD */
     while (!target->exited) {
-        /* Non-blocking serial peek: if user sends Ctrl+C, kill the process. */
+        /* Non-blocking peek (serial or keyboard): Ctrl+C kills the process. */
         char c = serial_read_char();
+        if (!c) c = input_getchar();
         if (c == 0x03) {
             process_kill(target);
             serial_write("^C\n");
