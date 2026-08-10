@@ -540,17 +540,24 @@ static int64_t spawn_process(uint64_t path_virt, uint64_t argv_virt,
     /* Inherit pipe ends from parent into child at fd 0 (stdin) / fd 1 (stdout). */
     fd_table_t *parent_fds = current_fds();
     if (parent_fds) {
+        /* Take a reference for the child's copy of each end.  The parent still
+           holds its own and typically closes it right after spawning; without
+           the extra ref that close would tear the end down under the child. */
         if (stdin_fd_parent >= 0) {
             fd_type_t t = fd_type(parent_fds, (int)stdin_fd_parent);
-            if (t == FD_PIPE_READ)
-                fd_set(&proc->fds, 0, FD_PIPE_READ,
-                       fd_id(parent_fds, (int)stdin_fd_parent));
+            if (t == FD_PIPE_READ) {
+                int pidx = fd_id(parent_fds, (int)stdin_fd_parent);
+                pipe_dup_read(pidx);
+                fd_set(&proc->fds, 0, FD_PIPE_READ, pidx);
+            }
         }
         if (stdout_fd_parent >= 0) {
             fd_type_t t = fd_type(parent_fds, (int)stdout_fd_parent);
-            if (t == FD_PIPE_WRITE)
-                fd_set(&proc->fds, 1, FD_PIPE_WRITE,
-                       fd_id(parent_fds, (int)stdout_fd_parent));
+            if (t == FD_PIPE_WRITE) {
+                int pidx = fd_id(parent_fds, (int)stdout_fd_parent);
+                pipe_dup_write(pidx);
+                fd_set(&proc->fds, 1, FD_PIPE_WRITE, pidx);
+            }
         }
     }
     *out_proc = proc;

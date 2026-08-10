@@ -85,6 +85,7 @@ KERNEL_C_SRCS := \
 	kernel/test/test_proc.c \
 	kernel/test/test_vfs.c \
 	kernel/test/test_vfsperm.c \
+	kernel/test/test_pipe.c \
 	kernel/test/test_cred.c \
 	kernel/test/tests.c
 

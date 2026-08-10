@@ -6,6 +6,9 @@
 
 int  pipe_alloc(void);
 void pipe_free(int idx);
+/* Claim an extra reference to an end for a process inheriting it. */
+void pipe_dup_read(int idx);
+void pipe_dup_write(int idx);
 int  pipe_write(int idx, const void *buf, uint32_t len);
 int  pipe_read(int idx, void *buf, uint32_t len);
 void pipe_close_write(int idx);
