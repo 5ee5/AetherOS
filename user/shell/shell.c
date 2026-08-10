@@ -148,6 +148,31 @@ static int readline(void)
     return len;
 }
 
+/* ---- background jobs ------------------------------------------------------ */
+/* A backgrounded child is never waited on inline, so the kernel keeps its exit
+   status until someone collects it.  Remember the pids and poll them with
+   WNOHANG before each prompt, otherwise every `cmd &` leaves a zombie in the
+   process table for as long as this shell lives. */
+#define MAX_BG_JOBS 16
+static int bg_pids[MAX_BG_JOBS];
+static int bg_count;
+
+static void bg_track(int pid)
+{
+    if (pid < 0) return;
+    if (bg_count < MAX_BG_JOBS) bg_pids[bg_count++] = pid;
+}
+
+static void bg_reap_finished(void)
+{
+    int kept = 0;
+    for (int i = 0; i < bg_count; i++) {
+        /* 0 = still running: keep polling it next time round. */
+        if (waitpid(bg_pids[i], 0, WNOHANG) == 0) bg_pids[kept++] = bg_pids[i];
+    }
+    bg_count = kept;
+}
+
 /* ---- command helpers ------------------------------------------------------ */
 
 static char *skip_spaces(char *p)
@@ -322,6 +347,7 @@ static void run_single(char *seg, int bg)
         int pid = spawn(resolve_path(cmd), argv_buf);
         if (pid < 0) { puts_raw(err_notfound); return; }
         if (!bg) waitpid(pid, 0, 0);
+        else     bg_track(pid);
     }
 }
 
@@ -347,7 +373,10 @@ static void run_pipeline(char **segs, int nseg, int bg)
         close(pipes[i][1]);
     }
 
-    if (bg) return;
+    if (bg) {
+        for (int i = 0; i < nseg; i++) bg_track(pids[i]);
+        return;
+    }
     for (int i = nseg - 1; i >= 0; i--)
         if (pids[i] >= 0) waitpid(pids[i], 0, 0);
 }
@@ -395,6 +424,7 @@ int main(void)
     puts_raw("AetherOS shell \xe2\x80\x94 type 'help' for commands\n");
 
     for (;;) {
+        bg_reap_finished();
         char cwd[CWD_BUF_SZ];
         if (!getcwd(cwd, sizeof(cwd))) { cwd[0] = '/'; cwd[1] = '\0'; }
         puts_raw(cwd);

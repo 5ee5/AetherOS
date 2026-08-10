@@ -219,12 +219,16 @@ esp: $(BUILD_DIR)/BOOTX64.EFI $(KERNEL_BUILD)/kernel.elf
 	cp $(BUILD_DIR)/BOOTX64.EFI $(ESP_DIR)/EFI/BOOT/BOOTX64.EFI
 	cp $(KERNEL_BUILD)/kernel.elf $(ESP_DIR)/EFI/OS/KERNEL.ELF
 
-$(DISK_IMG): $(USER_ELFS)
+# make-disk.sh also writes build/shell.elf and build/hello.elf into the image,
+# so they must be prerequisites too — otherwise editing the shell rebuilds
+# shell.elf but leaves the stale copy on the disk image, and the change is
+# silently not under test.
+$(DISK_IMG): $(USER_ELFS) $(SHELL_ELF) $(HELLO_ELF) scripts/make-disk.sh
 	./scripts/make-disk.sh
 
 disk: $(DISK_IMG)
 
-$(USB_IMG): $(USER_ELFS) esp
+$(USB_IMG): $(USER_ELFS) $(SHELL_ELF) $(HELLO_ELF) scripts/make-usb.sh esp
 	./scripts/make-usb.sh
 
 usb: $(USB_IMG)

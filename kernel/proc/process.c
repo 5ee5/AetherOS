@@ -5,8 +5,10 @@
 
 #include "core/serial.h"
 #include "exec/elf.h"
+#include "fs/vfs.h"
 #include "lib/string.h"
 #include "mem/heap.h"
+#include "net/socket.h"
 #include "proc/fd.h"
 #include "proc/pipe.h"
 #include "sched/sched.h"
@@ -70,6 +72,40 @@ void process_reap(struct process *proc)
     }
     spinlock_release_irqrestore(&proc_table_lock, f);
     if (claimed) kfree(proc);
+}
+
+/* Called when `parent` exits.  Any child of its that is already a zombie will
+   never be collected, so free it now; any child still running is re-parented to
+   0 (no parent) so it self-reaps on exit instead of sitting in the table
+   forever.  Without this a shell that launched background jobs left one dead
+   entry per job, and MAX_PROCS entries in, nothing could spawn again. */
+void process_orphan_children(struct process *parent)
+{
+    if (!parent) return;
+    for (;;) {
+        struct process *zombie = NULL;
+        uint64_t f = spinlock_acquire_irqsave(&proc_table_lock);
+        for (int i = 0; i < MAX_PROCS; ++i) {
+            struct process *c = s_procs[i];
+            if (!c || c->ppid != parent->pid || c == parent) continue;
+            if (c->exited) { zombie = c; break; }
+            c->ppid = 0;    /* orphan: reaped by the scheduler when it dies */
+        }
+        spinlock_release_irqrestore(&proc_table_lock, f);
+        if (!zombie) return;
+        /* Outside the lock: process_reap takes it and kfree may too. */
+        process_reap(zombie);
+    }
+}
+
+/* A process whose parent is gone can never be collected by waitpid — sys_waitpid
+   only accepts the recorded parent — so it is safe to free unilaterally.  Called
+   from the scheduler's deferred reaper, once the thread is off its own stack. */
+void process_reap_if_orphaned(struct process *proc)
+{
+    if (!proc || !proc->exited) return;
+    if (proc->ppid != 0 && process_find(proc->ppid) != NULL) return;
+    process_reap(proc);
 }
 
 /* Block the current thread until `target` exits.  Lock-protected so the wakeup
@@ -161,17 +197,32 @@ struct process *process_create_from_result(const elf_load_result_t *r)
     return proc;
 }
 
+/* Release every descriptor the process holds.  Pipe ends propagate EOF to the
+   other side; file and socket slots return to their global tables.  Those
+   tables are small fixed arrays (16 open files, 8 sockets), so a process that
+   exited without closing used to burn a slot permanently — sixteen such exits
+   and nothing on the system could open a file again. */
+void process_close_all_fds(struct process *proc)
+{
+    if (!proc) return;
+    for (int i = 0; i < MAX_FDS; i++) {
+        if (!proc->fds.fds[i].open) continue;
+        int id = proc->fds.fds[i].id;
+        switch (proc->fds.fds[i].type) {
+        case FD_PIPE_READ:  pipe_close_read(id);  break;
+        case FD_PIPE_WRITE: pipe_close_write(id); break;
+        case FD_SOCKET:     sock_close(id);       break;
+        case FD_FILE:       vfs_close(id);        break;
+        default: break;
+        }
+        proc->fds.fds[i].open = false;
+    }
+}
+
 void process_kill(struct process *proc)
 {
     if (!proc || proc->exited) return;
-    /* Close all pipe fds so connected processes see EOF. */
-    for (int i = 0; i < MAX_FDS; i++) {
-        if (!proc->fds.fds[i].open) continue;
-        fd_type_t ft = proc->fds.fds[i].type;
-        if (ft == FD_PIPE_READ)  pipe_close_read(proc->fds.fds[i].id);
-        if (ft == FD_PIPE_WRITE) pipe_close_write(proc->fds.fds[i].id);
-        proc->fds.fds[i].open = false;
-    }
+    process_close_all_fds(proc);
     /* Record exit status and wake any sys_waitpid callers (lock-protected). */
     process_mark_exited(proc, 130);   /* 128 + SIGINT */
     /* Mark the process thread as dead. */

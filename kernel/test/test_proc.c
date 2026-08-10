@@ -6,8 +6,10 @@
 #include <stdint.h>
 
 #include "exec/elf.h"
+#include "fs/vfs.h"
 #include "mem/heap.h"
 #include "mem/vmm.h"
+#include "proc/fd.h"
 #include "proc/process.h"
 #include "sched/thread.h"
 
@@ -62,4 +64,21 @@ void test_proc_run(void)
     vmm_space_destroy(r.cr3);
     kfree(t->kstack);
     kfree(t);
+
+    /* Exiting must return file descriptors to the VFS open-file table, which is
+       a global 16-entry array.  Loop well past that: if process teardown leaks
+       FD_FILE slots (it used to close only pipe ends), vfs_open starts failing
+       once the table fills and never recovers. */
+    if (vfs_file_size("/hello.txt") != UINT64_MAX) {
+        bool all_opened = true;
+        for (int i = 0; i < 64; i++) {
+            struct process holder;
+            fd_table_init(&holder.fds);
+            int vfd = vfs_open("/hello.txt");
+            if (vfd < 0) { all_opened = false; break; }
+            if (fd_alloc(&holder.fds, vfd) < 0) { all_opened = false; break; }
+            process_close_all_fds(&holder);   /* what exit and kill both call */
+        }
+        KTEST_ASSERT(all_opened);
+    }
 }

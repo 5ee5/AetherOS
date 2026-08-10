@@ -13,6 +13,7 @@ pid_t    getpid(void);
 pid_t    spawn(const char *path, char **argv);
 pid_t    spawn_io(const char *path, char **argv, int in_fd, int out_fd);
 pid_t    spawn_as(const char *path, char **argv, uid_t uid, gid_t gid);
+#define WNOHANG 1   /* waitpid: return 0 immediately if the child is running */
 pid_t    waitpid(pid_t pid, int *status, int options);
 long     listdir(const char *path, char *buf, long bufsz);
 long     listdir_all(const char *path, char *buf, long bufsz);

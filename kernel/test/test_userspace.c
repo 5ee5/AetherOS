@@ -5,9 +5,12 @@
 #include <stdint.h>
 
 #include "exec/elf.h"
+#include "lib/string.h"
+#include "mem/heap.h"
 #include "mem/pmm.h"
 #include "mem/uaccess.h"
 #include "mem/vmm.h"
+#include "os/elf64.h"
 
 extern const uint8_t hello_elf_start[];
 extern const uint8_t hello_elf_end[];
@@ -43,6 +46,26 @@ void test_userspace_run(void)
     elf_load_result_t r2;
     bool ok2 = elf_load(bad, sizeof(bad), &r2);
     KTEST_ASSERT(!ok2);
+
+    /* A malformed ELF that fails *after* the address space is created must not
+       leak it.  Every such path used to return without vmm_space_destroy, so a
+       user could exhaust physical memory by spawning a bad binary in a loop.
+       e_phoff past the image passes the early header checks and trips the
+       bounds check inside the segment loop, i.e. after vmm_space_create. */
+    uint8_t *evil = (uint8_t *)kmalloc((uint32_t)size);
+    KTEST_ASSERT(evil != NULL);
+    if (evil) {
+        memcpy(evil, hello_elf_start, size);
+        struct elf64_ehdr *eh = (struct elf64_ehdr *)evil;
+        eh->e_phoff = size + 0x1000ULL;      /* non-zero, but out of bounds */
+
+        uint64_t free_before = pmm_free_pages();
+        elf_load_result_t r3;
+        KTEST_ASSERT(elf_load(evil, size, &r3) == false);
+        /* The whole address space must have been handed back. */
+        KTEST_ASSERT(pmm_free_pages() == free_before);
+        kfree(evil);
+    }
 
     /* ---- copy_to/from_user fault recovery (Phase 3) -------------------- */
 

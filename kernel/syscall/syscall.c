@@ -104,6 +104,9 @@ void syscall_init(void)
 #define SYS_MEMINFO  604U
 #define SYS_DISKINFO 605U
 
+/* waitpid options (Linux value). */
+#define WNOHANG 1U
+
 static fd_table_t *current_fds(void);
 
 /* Write sink resolution. */
@@ -338,14 +341,12 @@ static int64_t sys_exit(uint64_t status)
 
     /* Record exit status and wake any sys_waitpid callers. */
     if (proc) {
-        /* Close all pipe fds so connected readers/writers see EOF. */
-        for (int i = 0; i < MAX_FDS; i++) {
-            if (!proc->fds.fds[i].open) continue;
-            fd_type_t ft = proc->fds.fds[i].type;
-            if (ft == FD_PIPE_READ)  pipe_close_read(proc->fds.fds[i].id);
-            if (ft == FD_PIPE_WRITE) pipe_close_write(proc->fds.fds[i].id);
-            proc->fds.fds[i].open = false;
-        }
+        /* Release every fd: pipe peers see EOF, and file/socket slots go back
+           to their (small, global) tables instead of leaking. */
+        process_close_all_fds(proc);
+        /* Collect our zombies and orphan the survivors before we become
+           unwaitable ourselves. */
+        process_orphan_children(proc);
         /* Record exit status and wake sys_waitpid callers (lock-protected). */
         process_mark_exited(proc, (int32_t)(status & 0xffU));
     }
@@ -367,7 +368,6 @@ static int64_t sys_exit(uint64_t status)
 
 static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
 {
-    (void)options;
     struct process *target = process_find((uint32_t)pid);
     if (!target) return -10;   /* ECHILD */
 
@@ -377,6 +377,12 @@ static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
        into process_reap and free a struct the other one is still holding. */
     struct process *caller = sched_current_process();
     if (!caller || target->ppid != caller->pid) return -10; /* ECHILD */
+
+    /* WNOHANG: report "still running" instead of blocking, so a shell can poll
+       its background jobs and collect them as they finish.  Without a way to
+       reap without blocking, every background job stayed a zombie for the
+       lifetime of the shell. */
+    if ((options & WNOHANG) && !target->exited) return 0;
 
     while (!target->exited) {
         /* Non-blocking peek (serial or keyboard): Ctrl+C kills the process. */

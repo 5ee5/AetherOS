@@ -158,6 +158,11 @@ uint64_t sched_tick(uint64_t old_rsp)
 			vmm_space_destroy(dead->cr3);
 			dead->cr3 = 0;
 		}
+		/* If nothing can ever waitpid this process (no parent, or the parent
+		   is gone), free its struct here — otherwise it sits in the process
+		   table as a permanent zombie.  A process with a live parent is left
+		   for that parent to collect. */
+		process_reap_if_orphaned((struct process *)dead->process);
 		kfree(dead->kstack);
 		kfree(dead);
 	}

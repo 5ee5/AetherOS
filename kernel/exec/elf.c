@@ -66,7 +66,7 @@ bool elf_load(const void *image, uint64_t size, elf_load_result_t *out)
         if (phdr_off < eh->e_phoff || phdr_off > size ||
             size - phdr_off < sizeof(struct elf64_phdr)) {
             serial_write("elf: phdr out of bounds\n");
-            return false;
+            goto fail;
         }
         const struct elf64_phdr *ph =
             (const struct elf64_phdr *)((const uint8_t *)image + phdr_off);
@@ -77,7 +77,7 @@ bool elf_load(const void *image, uint64_t size, elf_load_result_t *out)
         /* Overflow-safe bounds check on the segment's on-image file data. */
         if (ph->p_offset > size || size - ph->p_offset < ph->p_filesz) {
             serial_write("elf: segment file data out of bounds\n");
-            return false;
+            goto fail;
         }
 
         uint64_t flags = VMM_USER;
@@ -95,7 +95,7 @@ bool elf_load(const void *image, uint64_t size, elf_load_result_t *out)
         if (vend < ph->p_vaddr || ph->p_vaddr >= USER_STACK_TOP ||
             vend > USER_STACK_TOP) {
             serial_write("elf: segment vaddr out of user range\n");
-            return false;
+            goto fail;
         }
         uint64_t npages = div_ceil(vend - vbase, PAGE_SIZE);
 
@@ -106,7 +106,7 @@ bool elf_load(const void *image, uint64_t size, elf_load_result_t *out)
             uint64_t phys = pmm_alloc_page();
             if (phys == PMM_ALLOC_FAILED) {
                 serial_write("elf: pmm_alloc_page failed\n");
-                return false;
+                goto fail;
             }
 
             uint8_t *page_virt = (uint8_t *)(uintptr_t)
@@ -126,7 +126,7 @@ bool elf_load(const void *image, uint64_t size, elf_load_result_t *out)
 
             if (!vmm_space_map(cr3, virt_page, phys, flags)) {
                 serial_write("elf: vmm_space_map failed\n");
-                return false;
+                goto fail;
             }
         }
     }
@@ -136,14 +136,14 @@ bool elf_load(const void *image, uint64_t size, elf_load_result_t *out)
         uint64_t phys = pmm_alloc_page();
         if (phys == PMM_ALLOC_FAILED) {
             serial_write("elf: stack pmm_alloc failed\n");
-            return false;
+            goto fail;
         }
         uint8_t *pv = (uint8_t *)(uintptr_t)(vmm_direct_map_base() + phys);
         memset(pv, 0, PAGE_SIZE);
         uint64_t virt = USER_STACK_BASE + p * PAGE_SIZE;
         if (!vmm_space_map(cr3, virt, phys, VMM_USER | VMM_WRITABLE)) {
             serial_write("elf: stack vmm_space_map failed\n");
-            return false;
+            goto fail;
         }
     }
 
@@ -151,4 +151,12 @@ bool elf_load(const void *image, uint64_t size, elf_load_result_t *out)
     out->user_sp = USER_STACK_TOP - 16ULL;  /* 16-byte aligned below top */
     out->cr3     = cr3;
     return true;
+
+fail:
+    /* Every failure past vmm_space_create must release the address space, or
+       the PML4, its page tables and every segment page mapped so far leak.
+       These paths are all reachable from a user-supplied ELF via sys_spawn, so
+       leaking here lets an unprivileged loop exhaust physical memory. */
+    vmm_space_destroy(cr3);
+    return false;
 }

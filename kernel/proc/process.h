@@ -56,6 +56,16 @@ void process_reap(struct process *proc);
 /* Forcibly terminate a process (SIGKILL semantics). Safe to call from kernel. */
 void process_kill(struct process *proc);
 
+/* Release every fd the process holds (pipes, files, sockets). */
+void process_close_all_fds(struct process *proc);
+
+/* Called when `parent` exits: collect its zombie children and orphan the rest
+   so nothing is left waiting on a parent that will never call waitpid. */
+void process_orphan_children(struct process *parent);
+
+/* Reap `proc` if it has exited and no live parent can ever wait on it. */
+void process_reap_if_orphaned(struct process *proc);
+
 /* Fill buf with a human-readable process table (null-terminated).
    Returns the number of bytes written, including the NUL terminator. */
 uint32_t process_ps(char *buf, uint32_t bufsz);
