@@ -14,6 +14,7 @@
 #include "mem/heap.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "security/cred.h"
 #include "sync/spinlock.h"
 
 /* One global FS lock. ext2 shares a single `scratch` buffer and s_files[] is a
@@ -285,12 +286,89 @@ static const char *vfs_resolve(const char *path, char *out, uint32_t outsz)
     return out;
 }
 
+/* ---- Permission checks ---------------------------------------------------- */
+
+/* Access bits, matching cred_check()'s `access` argument. */
+#define ACC_R 4u
+#define ACC_W 2u
+#define ACC_X 1u   /* execute on a file; search on a directory */
+
+/* All of these run with vfs_lock already held and talk to ext2 directly: the
+   public vfs_* entry points would re-acquire the non-recursive lock. */
+
+static bool inode_permits(uint32_t ino, uint8_t access)
+{
+    struct process *p = sched_current_process();
+    if (!p) return true;   /* kernel context (boot, tests) is unrestricted */
+    uint16_t mode = 0; uint32_t uid = 0, gid = 0;
+    if (!ext2_inode_stat(s_root_fs, ino, &mode, &uid, &gid)) return false;
+    return cred_check(&p->cred, uid, gid, mode, access);
+}
+
+/* Require search (x) on every directory component of `abs` except the last.
+   POSIX path resolution: a name inside a directory you may not search is
+   unreachable regardless of its own mode.  `abs` must already be normalized
+   by vfs_resolve (absolute, no "." / ".." / redundant slashes). */
+static bool may_traverse(const char *abs)
+{
+    if (!sched_current_process()) return true;
+
+    uint32_t ino;
+    if (!ext2_lookup(s_root_fs, "/", &ino) || !inode_permits(ino, ACC_X))
+        return false;
+
+    char buf[512];
+    strncpy(buf, abs, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    /* For "/a/b/c" this checks "/a" and "/a/b" — each proper prefix, never the
+       final component itself. */
+    for (char *q = buf + 1; *q; ++q) {
+        if (*q != '/') continue;
+        *q = '\0';
+        bool ok = ext2_lookup(s_root_fs, buf, &ino) && inode_permits(ino, ACC_X);
+        *q = '/';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/* Inode of the directory holding the final component of `abs`. */
+static bool parent_dir_ino(const char *abs, uint32_t *out)
+{
+    char buf[512];
+    strncpy(buf, abs, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    char *slash = buf;
+    for (char *q = buf; *q; ++q)
+        if (*q == '/') slash = q;
+    if (slash == buf) buf[1] = '\0';   /* "/x" → parent is "/" */
+    else              *slash = '\0';
+    return ext2_lookup(s_root_fs, buf, out);
+}
+
+/* A name may be created, removed, or replaced only if the caller can search
+   every parent and write the directory that holds it.  This is the check that
+   was missing: sys_open's mode test only fires for files that already exist,
+   so without it any user could unlink /etc/passwd and recreate it with their
+   own contents — or displace a setuid binary — and become root. */
+static bool may_mutate_at(const char *abs)
+{
+    if (!sched_current_process()) return true;
+    if (!may_traverse(abs)) return false;
+    uint32_t dino;
+    if (!parent_dir_ino(abs, &dino)) return false;
+    return inode_permits(dino, ACC_W | ACC_X);
+}
+
 int vfs_open(const char *path)
 {
     VFS_LOCK();
     if (!s_root_fs) return -1;
     char abuf[512];
     path = vfs_resolve(path, abuf, sizeof(abuf));
+    if (!may_traverse(path)) return -1;
 
     uint32_t ino;
     if (!ext2_lookup(s_root_fs, path, &ino)) return -1;
@@ -340,8 +418,10 @@ uint32_t vfs_listdir(const char *path, char *buf, uint32_t bufsz, uint32_t flags
     if (!s_root_fs) return 0;
     char abuf[512];
     path = vfs_resolve(path, abuf, sizeof(abuf));
+    if (!may_traverse(path)) return 0;
     uint32_t ino;
     if (!ext2_lookup(s_root_fs, path, &ino)) return 0;
+    if (!inode_permits(ino, ACC_R)) return 0;
     return ext2_list_dir(s_root_fs, ino, buf, bufsz, flags);
 }
 
@@ -362,11 +442,14 @@ int vfs_open_ex(const char *path, int flags)
     char abuf[512];
     path = vfs_resolve(path, abuf, sizeof(abuf));
 
+    if (!may_traverse(path)) return -1;
+
     uint32_t ino = 0;
     bool found = ext2_lookup(s_root_fs, path, &ino);
 
     if (!found) {
         if (!(flags & 0x40)) return -1; /* O_CREAT not set */
+        if (!may_mutate_at(path)) return -1;
         struct process *cp = sched_current_process();
         uint32_t cuid = cp ? cp->cred.euid : 0;
         uint32_t cgid = cp ? cp->cred.egid : 0;
@@ -393,6 +476,7 @@ int vfs_creat(const char *path)
     if (!s_root_fs) return -1;
     char abuf[512];
     path = vfs_resolve(path, abuf, sizeof(abuf));
+    if (!may_mutate_at(path)) return -1;
     struct process *p = sched_current_process();
     uint32_t uid = p ? p->cred.euid : 0;
     uint32_t gid = p ? p->cred.egid : 0;
@@ -405,6 +489,7 @@ int vfs_mkdir(const char *path)
     if (!s_root_fs) return -1;
     char abuf[512];
     path = vfs_resolve(path, abuf, sizeof(abuf));
+    if (!may_mutate_at(path)) return -1;
     struct process *p = sched_current_process();
     uint32_t uid = p ? p->cred.euid : 0;
     uint32_t gid = p ? p->cred.egid : 0;
@@ -417,6 +502,7 @@ int vfs_unlink(const char *path)
     if (!s_root_fs) return -1;
     char abuf[512];
     path = vfs_resolve(path, abuf, sizeof(abuf));
+    if (!may_mutate_at(path)) return -1;
     return ext2_unlink(s_root_fs, path) ? 0 : -1;
 }
 
@@ -432,6 +518,10 @@ int vfs_chdir(const char *path)
     vfs_resolve(path, abuf, sizeof(abuf));
     uint32_t ino = 0;
     if (!ext2_lookup(s_root_fs, abuf, &ino)) return -1;
+    /* Entering a directory requires search permission on it and on every
+       directory above it, otherwise cwd-relative paths would sidestep the
+       traversal checks the other entry points perform. */
+    if (!may_traverse(abuf) || !inode_permits(ino, ACC_X)) return -1;
 
     struct process *proc = sched_current_process();
     char *cwd = proc ? proc->cwd : s_kernel_cwd;
@@ -488,6 +578,7 @@ int vfs_stat(const char *path, ext2_stat_t *out)
     if (!s_root_fs || !out) return -1;
     char abuf[512];
     path = vfs_resolve(path, abuf, sizeof(abuf));
+    if (!may_traverse(path)) return -1;
     uint32_t ino;
     if (!ext2_lookup(s_root_fs, path, &ino)) return -1;
     return ext2_stat_full(s_root_fs, ino, out) ? 0 : -1;
@@ -500,6 +591,9 @@ int vfs_rename(const char *old_path, const char *new_path)
     char oldbuf[512], newbuf[512];
     vfs_resolve(old_path, oldbuf, sizeof(oldbuf));
     vfs_resolve(new_path, newbuf, sizeof(newbuf));
+    /* A rename removes a name from one directory and adds one to another, so
+       both containing directories must be writable by the caller. */
+    if (!may_mutate_at(oldbuf) || !may_mutate_at(newbuf)) return -1;
     return ext2_rename(s_root_fs, oldbuf, newbuf) ? 0 : -1;
 }
 

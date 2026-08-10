@@ -62,6 +62,13 @@ static struct thread *alloc_thread(void)
 	t->run_next   = NULL;
 	t->wait_next  = NULL;
 	t->on_cpu     = false;
+	/* kmalloc does not zero, so these must be set explicitly.  `process` in
+	   particular is read by sched_current_process() on every kernel thread;
+	   left uninitialized it is a heap-garbage pointer that callers treat as a
+	   live process (permission checks and vfs_resolve both dereference it). */
+	t->process        = NULL;
+	t->sleep_next     = NULL;
+	t->sleep_deadline = 0;
 	return t;
 }
 

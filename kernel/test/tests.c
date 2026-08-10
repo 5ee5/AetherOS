@@ -13,6 +13,7 @@ void ktest_run_all(void)
 	test_userspace_run();
 	test_proc_run();
 	test_vfs_run();
+	test_vfsperm_run();
 	test_cred_run();
 	ktest_report();
 
