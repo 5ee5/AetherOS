@@ -12,6 +12,11 @@ struct thread;
 
 struct process {
     uint32_t      pid;
+    /* pid of the spawning process, or 0 for processes created directly by the
+       kernel (e.g. /bin/login).  sys_waitpid only accepts a caller's own
+       children, so this is what stops one user waiting on — and, via the
+       Ctrl+C path, killing or reaping — an unrelated process. */
+    uint32_t      ppid;
     struct thread *thread;
     uint64_t      cr3;
     fd_table_t    fds;
@@ -43,7 +48,9 @@ struct process *process_create_from_elf(const void *elf_data, uint64_t size);
 /* Look up a process by PID. Returns NULL if not found. */
 struct process *process_find(uint32_t pid);
 
-/* Free an exited process's struct and release its table slot. */
+/* Free an exited process's struct and release its table slot.  Idempotent:
+   only the caller that removes the table entry frees the struct, so a racing
+   second reap of the same process is a no-op rather than a double free. */
 void process_reap(struct process *proc);
 
 /* Forcibly terminate a process (SIGKILL semantics). Safe to call from kernel. */

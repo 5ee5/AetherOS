@@ -370,6 +370,14 @@ static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
     (void)options;
     struct process *target = process_find((uint32_t)pid);
     if (!target) return -10;   /* ECHILD */
+
+    /* Only a process's own parent may wait on it.  Without this check any user
+       could wait on an arbitrary pid and then take the Ctrl+C path below to
+       kill it — bypassing the uid check in sys_kill — or race a second waiter
+       into process_reap and free a struct the other one is still holding. */
+    struct process *caller = sched_current_process();
+    if (!caller || target->ppid != caller->pid) return -10; /* ECHILD */
+
     while (!target->exited) {
         /* Non-blocking peek (serial or keyboard): Ctrl+C kills the process. */
         char c = serial_read_char();

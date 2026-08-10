@@ -11,6 +11,7 @@ void ktest_run_all(void)
 	test_heap_run();
 	test_sched_run();
 	test_userspace_run();
+	test_proc_run();
 	test_vfs_run();
 	test_cred_run();
 	ktest_report();

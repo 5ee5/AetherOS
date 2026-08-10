@@ -61,12 +61,15 @@ static uint32_t alloc_pid_locked(void)
 void process_reap(struct process *proc)
 {
     if (!proc) return;
+    /* Claim the table slot under the lock and free only if we won.  Two callers
+       racing on the same process would otherwise both reach kfree. */
+    bool claimed = false;
     uint64_t f = spinlock_acquire_irqsave(&proc_table_lock);
     for (int i = 0; i < MAX_PROCS; ++i) {
-        if (s_procs[i] == proc) { s_procs[i] = NULL; break; }
+        if (s_procs[i] == proc) { s_procs[i] = NULL; claimed = true; break; }
     }
     spinlock_release_irqrestore(&proc_table_lock, f);
-    kfree(proc);
+    if (claimed) kfree(proc);
 }
 
 /* Block the current thread until `target` exits.  Lock-protected so the wakeup
@@ -129,6 +132,7 @@ struct process *process_create_from_result(const elf_load_result_t *r)
     proc->wait_queue  = NULL;
     proc->name[0]     = '\0';
     struct process *parent = sched_current_process();
+    proc->ppid        = parent ? parent->pid : 0;   /* 0 = spawned by the kernel */
     if (parent && parent->cwd[0]) {
         strncpy(proc->cwd, parent->cwd, sizeof(proc->cwd) - 1);
         proc->cwd[sizeof(proc->cwd) - 1] = '\0';

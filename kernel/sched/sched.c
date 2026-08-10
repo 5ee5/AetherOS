@@ -103,11 +103,13 @@ void sched_init(void)
 	serial_write("\n");
 }
 
+/* rq_lock is IRQ-safe: sched_tick takes it from the APIC timer ISR, so a thread
+   preempted while holding it would deadlock the ISR on the same CPU. */
 void sched_add(struct thread *t)
 {
-	spinlock_acquire(&rq_lock);
+	uint64_t f = spinlock_acquire_irqsave(&rq_lock);
 	rq_add(t);
-	spinlock_release(&rq_lock);
+	spinlock_release_irqrestore(&rq_lock, f);
 }
 
 struct thread *sched_current(void)
@@ -133,10 +135,10 @@ void sched_wake(struct thread *t)
 	while (t->on_cpu) {
 		__asm__ volatile("pause" ::: "memory");
 	}
-	spinlock_acquire(&rq_lock);
+	uint64_t f = spinlock_acquire_irqsave(&rq_lock);
 	t->state = THREAD_READY;
 	rq_add(t);
-	spinlock_release(&rq_lock);
+	spinlock_release_irqrestore(&rq_lock, f);
 }
 
 uint64_t sched_tick(uint64_t old_rsp)
@@ -165,6 +167,9 @@ uint64_t sched_tick(uint64_t old_rsp)
 
 	lapic_eoi();
 
+	/* Plain acquire: we are on the ISR path, so IF is already clear and the
+	   irqsave variant would only add a redundant pushfq/popfq to the hottest
+	   path in the kernel.  Every thread-context taker uses the irqsave form. */
 	spinlock_acquire(&rq_lock);
 
 	/* Advance tick counter and wake any expired sleepers. */
@@ -224,16 +229,17 @@ void sched_sleep_ms(uint64_t ms)
 	struct thread *t = sched_current();
 	if (!t || t->is_idle) return;
 
-	spinlock_acquire(&rq_lock);
+	uint64_t f = spinlock_acquire_irqsave(&rq_lock);
 	t->sleep_deadline = g_ticks + ms;
 	t->state          = THREAD_BLOCKED;
 	t->sleep_next     = sleep_head;
 	sleep_head        = t;
+	/* Drop the lock but stay in the irqsave window: the timer must not preempt
+	   between marking BLOCKED and yielding, and int $0x20 fires with IF clear.
+	   The ISR's iretq restores IF=0, so restore the caller's flags after. */
 	spinlock_release(&rq_lock);
-
-	__asm__ volatile("cli" ::: "memory");
 	__asm__ volatile("int $0x20" ::: "memory");
-	__asm__ volatile("sti" ::: "memory");
+	__asm__ volatile("push %0; popfq" :: "r"(f) : "memory", "cc");
 }
 
 void sched_ap_prepare(uint32_t cpu_id)
