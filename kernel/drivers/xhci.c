@@ -150,7 +150,11 @@ static uint32_t s_max_ports;
 static uint64_t *s_dcbaa;      static uint64_t s_dcbaa_phys;
 static trb_t    *s_cmd_ring;   static uint64_t s_cmd_ring_phys;
 static uint32_t  s_cmd_enq;    static uint8_t  s_cmd_cycle;
-static trb_t    *s_evt_ring;   static uint64_t s_evt_ring_phys;
+/* Controller-written DMA: volatile so the cycle-bit load below cannot be
+   hoisted.  Today the spinlock's memory clobber inside comp_wait's poll
+   loop also forces the reload, but that is a property of where the lock
+   happens to sit, not of the ring — don't depend on it. */
+static volatile trb_t *s_evt_ring;   static uint64_t s_evt_ring_phys;
 static uint32_t  s_evt_deq;    static uint8_t  s_evt_cycle;
 static uint64_t  s_erst_phys;
 
@@ -231,7 +235,7 @@ static int comp_register(uint64_t trb_phys)
 static void reap_events(void)
 {
     for (;;) {
-        trb_t *e = &s_evt_ring[s_evt_deq];
+        volatile trb_t *e = &s_evt_ring[s_evt_deq];
         if ((e->control & TRB_CYCLE) != s_evt_cycle) break;
 
         uint32_t type = TRB_GET_TYPE(e->control);
@@ -286,6 +290,7 @@ static uint32_t cmd_exec(uint64_t param, uint32_t control, uint8_t *slot_out)
     uint64_t p = ring_push(s_cmd_ring, s_cmd_ring_phys, &s_cmd_enq, &s_cmd_cycle,
                            param, 0, control);
     int idx = comp_register(p);
+    __asm__ volatile("" ::: "memory");   /* publish the TRB first */
     s_db[0] = 0;   /* command doorbell */
     spinlock_release_irqrestore(&s_xlock, f);
     if (idx < 0) return 0xff;
@@ -303,6 +308,7 @@ static uint32_t ep_transfer(struct xhci_dev *d, struct ep *e,
     uint64_t p = ring_push(e->ring, e->ring_phys, &e->enq, &e->cycle,
                            buf_phys, len, TRB_TYPE(TRB_NORMAL) | TRB_IOC);
     int idx = comp_register(p);
+    __asm__ volatile("" ::: "memory");
     s_db[d->slot_id] = e->dci;
     spinlock_release_irqrestore(&s_xlock, f);
     if (idx < 0) return 0xff;
@@ -341,6 +347,7 @@ int xhci_control(int dev, uint8_t bm_request_type, uint8_t b_request,
                              0, 0, TRB_TYPE(TRB_STATUS_STAGE) | TRB_IOC |
                              ((in || w_length == 0) ? 0u : (1u << 16)));
     int idx = comp_register(stp);
+    __asm__ volatile("" ::: "memory");
     s_db[d->slot_id] = 1;   /* EP0 */
     spinlock_release_irqrestore(&s_xlock, f);
     if (idx < 0) return -1;
@@ -378,7 +385,8 @@ int xhci_intr_poll(int dev, uint64_t buf_phys, uint32_t len)
         uint64_t p = ring_push(e->ring, e->ring_phys, &e->enq, &e->cycle,
                                buf_phys, len, TRB_TYPE(TRB_NORMAL) | TRB_IOC);
         e->pending = comp_register(p);
-        if (e->pending >= 0) s_db[d->slot_id] = e->dci;
+        if (e->pending >= 0) { __asm__ volatile("" ::: "memory");
+                               s_db[d->slot_id] = e->dci; }
     }
     reap_events();
     int idx = e->pending, ret = -2;
@@ -475,7 +483,7 @@ static bool setup_rings(void)
     ring_init(s_cmd_ring, s_cmd_ring_phys);
     s_cmd_enq = 0; s_cmd_cycle = 1;
 
-    s_evt_ring = dma_page(&s_evt_ring_phys);
+    s_evt_ring = (volatile trb_t *)dma_page(&s_evt_ring_phys);
     if (!s_evt_ring) return false;
     s_evt_deq = 0; s_evt_cycle = 1;
     uint32_t *erst = dma_page(&s_erst_phys);

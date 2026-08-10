@@ -13,7 +13,7 @@ COMMON_CFLAGS := -std=c11 -ffreestanding -fno-builtin -fno-stack-protector \
 	-fno-stack-check -fno-lto -m64 -mno-red-zone -mgeneral-regs-only \
 	$(COMMON_WARN) -Iinclude
 
-KERNEL_CFLAGS := $(COMMON_CFLAGS) -fno-pic -fno-pie -mcmodel=kernel -Ikernel
+KERNEL_CFLAGS := $(COMMON_CFLAGS) -O2 -fno-pic -fno-pie -mcmodel=kernel -Ikernel
 BOOT_CFLAGS := $(COMMON_CFLAGS) -fpic -fshort-wchar -maccumulate-outgoing-args
 
 KERNEL_LDFLAGS := -nostdlib -z max-page-size=0x1000 -T kernel/linker.ld

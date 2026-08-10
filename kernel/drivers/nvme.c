@@ -84,7 +84,10 @@ static uint32_t s_dstrd;    /* doorbell stride in bytes */
 
 /* admin queues */
 static nvme_sqe_t *s_asq;
-static nvme_cqe_t *s_acq;
+/* Controller-written DMA memory: must be volatile, or the compiler hoists
+   the phase-tag load out of the polling loop below and we spin on a stale
+   register until timeout.  Verified: at -O2 the load moved above the loop. */
+static volatile nvme_cqe_t *s_acq;
 static uint64_t    s_asq_phys;
 static uint64_t    s_acq_phys;
 static uint16_t    s_asq_tail;
@@ -93,7 +96,7 @@ static uint8_t     s_acq_phase;
 
 /* I/O queue 1 */
 static nvme_sqe_t *s_iosq;
-static nvme_cqe_t *s_iocq;
+static volatile nvme_cqe_t *s_iocq;
 static uint64_t    s_iosq_phys;
 static uint64_t    s_iocq_phys;
 static uint16_t    s_iosq_tail;
@@ -154,6 +157,8 @@ static uint16_t asq_submit(nvme_sqe_t *cmd)
     cmd->cdw0 = (cmd->cdw0 & 0x0000ffffu) | ((uint32_t)cid << 16);
     s_asq[s_asq_tail] = *cmd;
     s_asq_tail = (uint16_t)((s_asq_tail + 1u) % NVME_AQ_SIZE);
+    /* Publish the entry before ringing the doorbell that points at it. */
+    __asm__ volatile("" ::: "memory");
     doorbell(0, s_asq_tail);
     return cid;
 }
@@ -161,7 +166,7 @@ static uint16_t asq_submit(nvme_sqe_t *cmd)
 static bool acq_wait(void)
 {
     for (uint32_t i = 0; i < 2000000u; ++i) {
-        nvme_cqe_t *e = &s_acq[s_acq_head];
+        volatile nvme_cqe_t *e = &s_acq[s_acq_head];
         if ((e->status & 1u) != s_acq_phase) {
             for (volatile int j = 0; j < 10; ++j) {}
             continue;
@@ -233,10 +238,11 @@ static bool io_cmd(uint8_t opc, uint64_t slba, uint16_t nlb, uint64_t buf_phys)
 
     s_iosq[s_iosq_tail] = cmd;
     s_iosq_tail = (uint16_t)((s_iosq_tail + 1u) % NVME_IOQ_SIZE);
+    __asm__ volatile("" ::: "memory");
     doorbell(2, s_iosq_tail);
 
     for (uint32_t i = 0; i < 2000000u; ++i) {
-        nvme_cqe_t *e = &s_iocq[s_iocq_head];
+        volatile nvme_cqe_t *e = &s_iocq[s_iocq_head];
         if ((e->status & 1u) != s_iocq_phase) {
             for (volatile int j = 0; j < 10; ++j) {}
             continue;
@@ -322,9 +328,9 @@ bool nvme_init(void)
         return false;
     }
     s_asq = (nvme_sqe_t *)(uintptr_t)(vmm_direct_map_base() + s_asq_phys);
-    s_acq = (nvme_cqe_t *)(uintptr_t)(vmm_direct_map_base() + s_acq_phys);
+    s_acq = (volatile nvme_cqe_t *)(uintptr_t)(vmm_direct_map_base() + s_acq_phys);
     memset(s_asq, 0, 4096);
-    memset(s_acq, 0, 4096);
+    memset((void *)s_acq, 0, 4096);
     s_asq_tail  = 0;
     s_acq_head  = 0;
     s_acq_phase = 1;   /* first completions from controller have phase=1 */
@@ -388,9 +394,9 @@ bool nvme_init(void)
         serial_write("nvme: I/O queue alloc failed\n");
         return false;
     }
-    s_iocq = (nvme_cqe_t *)(uintptr_t)(vmm_direct_map_base() + s_iocq_phys);
+    s_iocq = (volatile nvme_cqe_t *)(uintptr_t)(vmm_direct_map_base() + s_iocq_phys);
     s_iosq = (nvme_sqe_t *)(uintptr_t)(vmm_direct_map_base() + s_iosq_phys);
-    memset(s_iocq, 0, 4096);
+    memset((void *)s_iocq, 0, 4096);
     memset(s_iosq, 0, 4096);
     s_iocq_head  = 0;
     s_iosq_tail  = 0;

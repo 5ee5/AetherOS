@@ -96,13 +96,17 @@ typedef struct {
 static volatile uint32_t *s_mmio;
 static uint64_t           s_dmap;
 
-static rx_desc_t *s_rx_ring;
+/* Descriptor rings are written by the NIC via DMA.  Without volatile, -O2
+   hoists the status-bit load out of the completion poll below and the loop
+   spins on a stale value — it happens to work in QEMU only because the
+   descriptor is usually already done on the first read. */
+static volatile rx_desc_t *s_rx_ring;
 static uint64_t   s_rx_ring_phys;
 static uint8_t   *s_rx_bufs[RX_RING_SIZE];
 static uint64_t   s_rx_buf_phys[RX_RING_SIZE];
 static uint32_t   s_rx_tail;
 
-static tx_desc_t *s_tx_ring;
+static volatile tx_desc_t *s_tx_ring;
 static uint64_t   s_tx_ring_phys;
 static uint8_t   *s_tx_buf;   /* one shared 4096-byte TX buffer */
 static uint64_t   s_tx_buf_phys;
@@ -170,7 +174,7 @@ static uint16_t e1000_nic_recv(nic_t *self, void *buf, uint16_t max_len)
         return 0;
     }
 
-    rx_desc_t *d = &s_rx_ring[tail];
+    volatile rx_desc_t *d = &s_rx_ring[tail];
     if (!(d->status & DESC_STATUS_DD)) {
         spinlock_release_irqrestore(&s_rx_lock, f);
         return 0;
@@ -263,7 +267,7 @@ bool e1000_init(void)
     if (rx_ring_phys == PMM_ALLOC_FAILED) return false;
     s_rx_ring      = pv(rx_ring_phys);
     s_rx_ring_phys = rx_ring_phys;
-    memset(s_rx_ring, 0, 4096);
+    memset((void *)s_rx_ring, 0, 4096);
 
     for (uint32_t i = 0; i < RX_RING_SIZE; ++i) {
         uint64_t p = pmm_alloc_page();
@@ -289,7 +293,7 @@ bool e1000_init(void)
     if (tx_ring_phys == PMM_ALLOC_FAILED) return false;
     s_tx_ring      = pv(tx_ring_phys);
     s_tx_ring_phys = tx_ring_phys;
-    memset(s_tx_ring, 0, 4096);
+    memset((void *)s_tx_ring, 0, 4096);
 
     uint64_t tx_buf_phys = pmm_alloc_page();
     if (tx_buf_phys == PMM_ALLOC_FAILED) return false;
