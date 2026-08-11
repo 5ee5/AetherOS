@@ -3,7 +3,11 @@
 #include <unistd.h>
 
 #define BUF_SZ 4096
-#define LINE_SZ 512
+/* Long enough for a minified HTML page to arrive as the single line it is: at
+   512 bytes a long line was chopped into pieces and each piece matched
+   separately, so `wget ... | grep foo` printed only the piece that happened to
+   contain the pattern.  Lines longer than this are still split. */
+#define LINE_SZ 8192
 
 static int grep_fd(const char *pattern, int fd, const char *filename, int show_name)
 {

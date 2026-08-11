@@ -119,6 +119,12 @@ void syscall_init(void)
    caller that asks for more simply gets this much. */
 #define SYS_BUF_MAX (64U * 1024U)
 
+/* How long a socket read waits for the peer before giving up, and how long it
+   sleeps between polls.  There is no non-blocking mode and no SO_RCVTIMEO, so
+   this is the only thing standing between a silent peer and a stuck process. */
+#define SOCK_RECV_TIMEOUT_MS 30000U
+#define SOCK_POLL_MS             1U
+
 static fd_table_t *current_fds(void);
 
 /* Write sink resolution. */
@@ -336,12 +342,19 @@ static int64_t sys_read(uint64_t fd, uint64_t buf_virt, uint64_t count)
         return n;
     }
 
-    /* Socket: block until data or EOF; return one chunk. */
+    /* Socket: block until data, EOF, or the timeout; return one chunk. */
     if (type == FD_SOCKET) {
         int idx = fd_id(fds, (int)fd);
         int n;
-        while ((n = sock_recv(idx, kbuf, chunk)) == 0)
-            __asm__ volatile("int $0x20" ::: "memory");
+        /* Bounded wait.  This used to spin on int $0x20 forever, so a peer that
+           connected and then said nothing hung the reader for good with no way
+           out.  Sleeping rather than yielding also stops it burning a core. */
+        uint64_t waited = 0;
+        while ((n = sock_recv(idx, kbuf, chunk)) == 0) {
+            if (waited >= SOCK_RECV_TIMEOUT_MS) return -11; /* EAGAIN */
+            sched_sleep_ms(SOCK_POLL_MS);
+            waited += SOCK_POLL_MS;
+        }
         if (n < 0) return 0; /* EOF */
         if (!copy_to_user((void *)(uintptr_t)buf_virt, kbuf, (uint64_t)n)) return -14;
         return n;
@@ -891,8 +904,14 @@ static int64_t sys_recv(uint64_t fd, uint64_t buf_virt, uint64_t len, uint64_t f
     char kbuf[512];
     uint32_t chunk = len > sizeof(kbuf) ? (uint32_t)sizeof(kbuf) : (uint32_t)len;
     int n;
-    while ((n = sock_recv(idx, kbuf, chunk)) == 0)
-        __asm__ volatile("int $0x20" ::: "memory");
+    /* Same bounded wait as sys_read on a socket: a silent peer must not pin the
+       caller forever. */
+    uint64_t waited = 0;
+    while ((n = sock_recv(idx, kbuf, chunk)) == 0) {
+        if (waited >= SOCK_RECV_TIMEOUT_MS) return -11; /* EAGAIN */
+        sched_sleep_ms(SOCK_POLL_MS);
+        waited += SOCK_POLL_MS;
+    }
     if (n < 0) return 0; /* EOF */
     if (!copy_to_user((void *)(uintptr_t)buf_virt, kbuf, (uint64_t)n)) return -14;
     return (int64_t)n;

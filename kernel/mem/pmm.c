@@ -79,7 +79,7 @@ void pmm_init(const struct os_boot_info *boot_info)
 	for (uint64_t i = 0; i < PMM_BITMAP_WORDS; ++i) {
 		pmm_bitmap[i] = UINT64_MAX;
 	}
-	pmm_total = PMM_MAX_PAGES;
+	pmm_total = 0;   /* set from the memory map below, not from the bitmap span */
 	pmm_free = 0;
 
 	const uint8_t *map = (const uint8_t *)(uintptr_t)boot_info->memory_map;
@@ -102,6 +102,12 @@ void pmm_init(const struct os_boot_info *boot_info)
 			mark_range_free(start, end);
 		}
 	}
+
+	/* Everything the memory map said was usable: this, not PMM_MAX_PAGES, is the
+	   machine's installed RAM.  Reporting the bitmap span made `free` claim 64 GiB
+	   on a 512 MiB machine.  Memory above the bitmap's reach is not counted, since
+	   the PMM cannot hand it out either. */
+	pmm_total = pmm_free;
 
 	mark_range_used(0, 0x100000ULL);
 	mark_range_used(boot_info->kernel_phys_start,

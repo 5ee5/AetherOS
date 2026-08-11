@@ -37,10 +37,23 @@ int main(int argc, char **argv)
     int n = 10;
     int first_file = 1;
 
-    if (argc > 1 && argv[1][0] == '-' && argv[1][1] == 'n') {
-        n = (int)strtol(argv[1] + 2, 0, 10);
+    /* Accept -N, -nN and -n N.  Only -nN worked before, so `head -2` and
+       `head -n 2` were both taken as filenames ("head: -2: not found"). */
+    if (argc > 1 && argv[1][0] == '-' && argv[1][1] != '\0') {
+        const char *spec = argv[1] + 1;
+        if (*spec == 'n') {
+            spec++;
+            if (*spec == '\0' && argc > 2) {      /* "-n N" */
+                spec = argv[2];
+                first_file = 3;
+            } else {                               /* "-nN" */
+                first_file = 2;
+            }
+        } else {                                   /* "-N" */
+            first_file = 2;
+        }
+        n = (int)strtol(spec, 0, 10);
         if (n <= 0) n = 10;
-        first_file = 2;
     }
 
     if (first_file >= argc) {
