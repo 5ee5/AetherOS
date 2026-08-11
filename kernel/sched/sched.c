@@ -27,6 +27,11 @@ static spinlock_t rq_lock = SPINLOCK_INIT;
 static struct thread *rq_head;
 static struct thread *rq_tail;
 
+/* Scheduler entries, not milliseconds: this handler is entered by the hardware
+   timer on every CPU *and* by every software yield (int $0x20), so it advances
+   several times faster than wall time.  Sleep deadlines therefore use the TSC
+   (apic_now_tsc) rather than this counter, which is kept only as a coarse
+   activity count. */
 static volatile uint64_t g_ticks;
 static struct thread *sleep_head;  /* protected by rq_lock */
 
@@ -274,12 +279,14 @@ uint64_t sched_tick(uint64_t old_rsp)
 	   path in the kernel.  Every thread-context taker uses the irqsave form. */
 	spinlock_acquire(&rq_lock);
 
-	/* Advance tick counter and wake any expired sleepers. */
+	/* Advance the activity counter and wake any sleeper whose deadline has passed
+	   on the real clock. */
 	g_ticks++;
+	uint64_t now_tsc = apic_now_tsc();
 	struct thread **sp = &sleep_head;
 	while (*sp) {
 		struct thread *st = *sp;
-		if (st->sleep_deadline <= g_ticks) {
+		if (st->sleep_deadline <= now_tsc) {
 			*sp = st->sleep_next;
 			st->sleep_next = NULL;
 			/* Unlink unconditionally, but only a still-BLOCKED thread goes
@@ -353,7 +360,10 @@ void sched_sleep_ms(uint64_t ms)
 	if (!t || t->is_idle) return;
 
 	uint64_t f = spinlock_acquire_irqsave(&rq_lock);
-	t->sleep_deadline = g_ticks + ms;
+	/* Deadline on the monotonic clock.  This used to be `g_ticks + ms`, which
+	   made every sleep expire early by however many times the scheduler happened
+	   to be entered per millisecond — `sleep 30` returned after about 10 s. */
+	t->sleep_deadline = apic_now_tsc() + ms * apic_tsc_per_ms();
 	t->state          = THREAD_BLOCKED;
 	t->sleep_next     = sleep_head;
 	sleep_head        = t;

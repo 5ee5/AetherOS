@@ -18,4 +18,11 @@ uint64_t apic_timer_init(void);
 /* Send an IPI to the target LAPIC ID. */
 void lapic_send_ipi(uint8_t target_lapic_id, uint32_t icr_lo);
 
+/* Monotonic clock for timeouts: a raw TSC reading, and the measured number of
+   TSC ticks per millisecond (calibrated against the PIT in apic_timer_init).
+   Timer-interrupt counts are not a clock — the same handler runs on every CPU and
+   on every software yield — so anything measuring elapsed time uses these. */
+uint64_t apic_now_tsc(void);
+uint64_t apic_tsc_per_ms(void);
+
 #endif

@@ -36,6 +36,27 @@
 #define PIT_CMD       0x43U
 #define PIT_FREQ      1193182ULL   /* Hz */
 #define CAL_MS        10U          /* calibration window in milliseconds */
+
+/* TSC ticks per millisecond, measured against the PIT in apic_timer_init. */
+static uint64_t s_tsc_per_ms;
+
+static inline uint64_t rdtsc(void)
+{
+	uint32_t lo, hi;
+	__asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+	return ((uint64_t)hi << 32) | lo;
+}
+
+uint64_t apic_tsc_per_ms(void)
+{
+	return s_tsc_per_ms;
+}
+
+uint64_t apic_now_tsc(void)
+{
+	return rdtsc();
+}
+
 #define CAL_TICKS     ((uint16_t)((PIT_FREQ * CAL_MS) / 1000U))
 
 /* ---- Module state ----------------------------------------------------- */
@@ -125,15 +146,29 @@ uint64_t apic_timer_init(void)
 
 	/* Start the PIT one-shot and APIC timer simultaneously. */
 	lapic_write(LAPIC_TIMER_INITCNT, 0xffffffffU);
+	uint64_t tsc_start = rdtsc();
 	pit_start_oneshot(CAL_TICKS);
 	pit_wait_done();
 
 	uint32_t remaining = lapic_read(LAPIC_TIMER_CURCNT);
 	uint32_t ticks_elapsed = 0xffffffffU - remaining;
 
+	/* Calibrate the TSC over the same window.  The scheduler needs a real clock
+	   for sleep deadlines: counting timer interrupts does not work, because the
+	   handler is also entered by every software yield and once per CPU, so the
+	   count runs several times faster than wall time. */
+	s_tsc_per_ms = (rdtsc() - tsc_start) / CAL_MS;
+	if (s_tsc_per_ms == 0) {
+		s_tsc_per_ms = 1;
+	}
+
 	/* ticks_elapsed counts in units of (bus_freq / 16).
 	   bus_freq = ticks_elapsed * 16 * (1000 / CAL_MS) */
 	uint64_t bus_freq = (uint64_t)ticks_elapsed * 16ULL * (1000ULL / CAL_MS);
+
+	serial_write("lapic: tsc_per_ms=");
+	serial_write_dec(s_tsc_per_ms);
+	serial_write("\n");
 
 	serial_write("lapic: timer bus_freq=");
 	serial_write_dec(bus_freq / 1000000ULL);
