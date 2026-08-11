@@ -39,15 +39,10 @@ static const char s_scan_ascii_shift[128] = {
     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
 };
 
-#define KBD_BUF_SIZE 64
-static volatile char    s_buf[KBD_BUF_SIZE];
-static volatile uint8_t s_head;
-static volatile uint8_t s_tail;
+/* Decoded characters go straight into the shared console ring (core/input.c);
+   this driver keeps no buffer of its own. */
 static volatile bool    s_shift;
 static volatile bool    s_caps;
-static struct thread   *s_stdin_waiter;
-
-void ps2kbd_set_stdin_waiter(struct thread *t) { s_stdin_waiter = t; }
 
 static inline uint8_t inb(uint16_t port)
 {
@@ -102,15 +97,3 @@ void ps2kbd_init(void)
     serial_write("ps2kbd: IRQ1 enabled\n");
 }
 
-char ps2kbd_getchar(void)
-{
-    if (s_head == s_tail) return 0;
-    char c = s_buf[s_head];
-    s_head = (uint8_t)((s_head + 1) % KBD_BUF_SIZE);
-    return c;
-}
-
-bool ps2kbd_ready(void)
-{
-    return s_head != s_tail;
-}
