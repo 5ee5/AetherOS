@@ -9,6 +9,7 @@
 
 #include "lib/string.h"
 #include "mem/heap.h"
+#include "sched/sched.h"
 #include "sync/spinlock.h"
 
 /* ---- TCP header ---------------------------------------------------------- */
@@ -61,6 +62,19 @@ struct tcp_conn {
     uint32_t    rxbuf_head;
     uint32_t    rxbuf_tail;
 };
+
+/* Retransmission.  This stack has no timer thread and no send queue, so the
+   sending thread waits for the acknowledgement itself, resending with a doubling
+   timeout.  Worst case is about 9 s before a send is reported failed. */
+#define TCP_RTO_MS      300U
+#define TCP_MAX_RETRIES   5
+#define TCP_POLL_MS       5U
+
+/* Sequence numbers wrap, so compare them as signed differences. */
+static inline bool seq_ge(uint32_t a, uint32_t b)
+{
+    return (int32_t)(a - b) >= 0;
+}
 
 static struct tcp_conn s_conns[MAX_CONNS];
 static uint16_t        s_next_port = 49152;
@@ -173,14 +187,23 @@ tcp_conn_t *tcp_connect(uint32_t dst_ip, uint16_t dst_port)
     c->rxbuf_head = 0;
     c->rxbuf_tail = 0;
 
-    /* Send SYN. */
+    /* Send the SYN, resending it if the SYN-ACK does not arrive: a single dropped
+       SYN used to fail the connect outright.  poll_once() keeps latency low rather
+       than waiting on the network thread's next pass. */
     c->state = TCP_SYN_SENT;
-    tcp_send_seg(c, TCP_FLAG_SYN, NULL, 0);
+    uint32_t isn = c->snd_seq;
+    for (int attempt = 0; attempt < TCP_MAX_RETRIES && c->state == TCP_SYN_SENT;
+         ++attempt) {
+        c->snd_seq = isn;
+        tcp_send_seg(c, TCP_FLAG_SYN, NULL, 0);
 
-    /* Wait for SYN-ACK (up to ~3s). */
-    for (uint32_t i = 0; i < 300000U && c->state == TCP_SYN_SENT; ++i) {
-        poll_once();
-        for (volatile int j = 0; j < 100; ++j) {}
+        uint64_t wait_ms = (uint64_t)TCP_RTO_MS << attempt;
+        for (uint64_t waited = 0;
+             waited < wait_ms && c->state == TCP_SYN_SENT;
+             waited += TCP_POLL_MS) {
+            poll_once();
+            sched_sleep_ms(TCP_POLL_MS);
+        }
     }
 
     if (c->state != TCP_ESTABLISHED) {
@@ -190,6 +213,31 @@ tcp_conn_t *tcp_connect(uint32_t dst_ip, uint16_t dst_port)
     return c;
 }
 
+/* Send one data segment and keep resending it until the peer acknowledges it.
+   snd_una was tracked but never acted on, so a single dropped segment stalled the
+   connection silently and for good: the peer waited for data it never got, and we
+   waited for an acknowledgement that was never coming. */
+static bool send_reliable(struct tcp_conn *c, const uint8_t *data, uint16_t dlen)
+{
+    uint32_t start = c->snd_seq;
+    uint32_t end   = start + dlen;
+
+    for (int attempt = 0; attempt < TCP_MAX_RETRIES; ++attempt) {
+        /* tcp_send_seg advances snd_seq, so rewind before resending. */
+        c->snd_seq = start;
+        if (!tcp_send_seg(c, TCP_FLAG_ACK | TCP_FLAG_PSH, data, dlen)) return false;
+
+        uint64_t wait_ms = (uint64_t)TCP_RTO_MS << attempt;
+        for (uint64_t waited = 0; waited < wait_ms; waited += TCP_POLL_MS) {
+            if (seq_ge(c->snd_una, end)) return true;
+            /* The peer closing is not a reason to keep retrying. */
+            if (c->state != TCP_ESTABLISHED) return seq_ge(c->snd_una, end);
+            sched_sleep_ms(TCP_POLL_MS);
+        }
+    }
+    return false;
+}
+
 bool tcp_send(tcp_conn_t *c, const void *data, uint16_t len)
 {
     if (!c || c->state != TCP_ESTABLISHED) return false;
@@ -197,7 +245,7 @@ bool tcp_send(tcp_conn_t *c, const void *data, uint16_t len)
     const uint8_t *p = (const uint8_t *)data;
     while (len > 0) {
         uint16_t chunk = (len > 1460) ? 1460 : len;
-        if (!tcp_send_seg(c, TCP_FLAG_ACK | TCP_FLAG_PSH, p, chunk)) return false;
+        if (!send_reliable(c, p, chunk)) return false;
         p   += chunk;
         len -= chunk;
     }
@@ -276,7 +324,10 @@ void tcp_input(uint32_t src_ip, uint32_t dst_ip, const void *pkt, uint16_t len)
 
     case TCP_ESTABLISHED:
         if (flags & TCP_FLAG_RST) { c->state = TCP_CLOSED; break; }
-        if (flags & TCP_FLAG_ACK) c->snd_una = ack;
+        /* Only ever forward: a duplicate or reordered ACK carrying an older
+           number would otherwise undo progress and make the sender wait for an
+           acknowledgement it had already received. */
+        if ((flags & TCP_FLAG_ACK) && seq_ge(ack, c->snd_una)) c->snd_una = ack;
         if (dlen > 0 && seq == c->rcv_nxt) {
             rxbuf_push(c, data, dlen);
             c->rcv_nxt += dlen;
