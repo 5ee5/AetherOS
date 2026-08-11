@@ -206,7 +206,13 @@ bool tcp_send(tcp_conn_t *c, const void *data, uint16_t len)
 
 uint16_t tcp_recv(tcp_conn_t *c, void *buf, uint16_t max)
 {
-    if (!c || c->state != TCP_ESTABLISHED) return 0;
+    if (!c) return 0;
+    /* Drain buffered data even once the peer's FIN has moved us out of
+       ESTABLISHED.  An HTTP response with "Connection: close" is normally still
+       sitting in the receive buffer when the FIN arrives, and refusing to hand
+       it over truncated every transfer at whatever the last read happened to
+       leave behind.  EOF is not this function's call to make: sock_recv reports
+       it only when the buffer is empty *and* the connection is gone. */
     return rxbuf_pop(c, (uint8_t *)buf, max);
 }
 

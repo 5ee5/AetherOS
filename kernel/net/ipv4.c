@@ -38,8 +38,17 @@ void ipv4_recv(const uint8_t src_mac[6], const void *pkt, uint16_t len)
     /* Cache ARP entry for sender. */
     arp_insert(ip->src, src_mac);
 
+    /* The payload length comes from the IP header, not from the frame we were
+       handed: Ethernet pads every frame to 60 bytes, so a bare TCP ACK (14 + 20
+       + 20 = 54) arrives with 6 trailing zero bytes.  Trusting the frame length
+       fed those zeroes to TCP as data, which advanced rcv_nxt past the peer's
+       real sequence number and made the next (genuine) segment look
+       out-of-order — so an HTTP response was ACKed but never delivered. */
+    uint16_t total = ntohs(ip->total_length);
+    if (total < ihl || total > len) return;   /* malformed or truncated */
+
     const uint8_t *payload = (const uint8_t *)pkt + ihl;
-    uint16_t plen = (uint16_t)(len - ihl);
+    uint16_t plen = (uint16_t)(total - ihl);
 
     switch (ip->protocol) {
     case IP_PROTO_ICMP: icmp_recv(ip->src, payload, plen); break;

@@ -7,31 +7,31 @@ void fd_table_init(fd_table_t *t)
     memset(t, 0, sizeof(*t));
 }
 
-int fd_alloc(fd_table_t *t, int vfs_fd)
+/* Allocation always starts at 3: fds 0/1/2 belong to stdin/stdout/stderr, which
+   are either console stubs (no table entry at all) or pipe ends placed there
+   explicitly by fd_set.  Handing a socket or file out at fd 0 used to make
+   read() serve it console input instead of the descriptor's real contents. */
+static int fd_alloc_slot(fd_table_t *t, fd_type_t type, int id)
 {
-    /* Start from 3 to keep 0/1/2 as stdin/stdout/stderr stubs. */
     for (int i = 3; i < MAX_FDS; ++i) {
         if (!t->fds[i].open) {
             t->fds[i].open = true;
-            t->fds[i].type = FD_FILE;
-            t->fds[i].id   = vfs_fd;
+            t->fds[i].type = type;
+            t->fds[i].id   = id;
             return i;
         }
     }
     return -1;
 }
 
+int fd_alloc(fd_table_t *t, int vfs_fd)
+{
+    return fd_alloc_slot(t, FD_FILE, vfs_fd);
+}
+
 int fd_alloc_socket(fd_table_t *t, int sock_idx)
 {
-    for (int i = 0; i < MAX_FDS; ++i) {
-        if (!t->fds[i].open) {
-            t->fds[i].open = true;
-            t->fds[i].type = FD_SOCKET;
-            t->fds[i].id   = sock_idx;
-            return i;
-        }
-    }
-    return -1;
+    return fd_alloc_slot(t, FD_SOCKET, sock_idx);
 }
 
 int fd_to_vfs(fd_table_t *t, int fd)
@@ -53,18 +53,9 @@ int fd_id(fd_table_t *t, int fd)
     return t->fds[fd].id;
 }
 
-/* Allocate a pipe fd; start from 3 to keep 0/1/2 as stdio stubs. */
 int fd_alloc_pipe(fd_table_t *t, int pipe_idx, fd_type_t type)
 {
-    for (int i = 3; i < MAX_FDS; ++i) {
-        if (!t->fds[i].open) {
-            t->fds[i].open = true;
-            t->fds[i].type = type;
-            t->fds[i].id   = pipe_idx;
-            return i;
-        }
-    }
-    return -1;
+    return fd_alloc_slot(t, type, pipe_idx);
 }
 
 /* Set a specific fd slot (used to install pipe ends in child processes). */

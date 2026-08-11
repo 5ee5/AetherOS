@@ -81,4 +81,23 @@ void test_proc_run(void)
         }
         KTEST_ASSERT(all_opened);
     }
+
+    /* Every allocator must reserve 0/1/2 for stdio.  fd_alloc_socket used to
+       start at 0, so the first socket in a fresh process landed on stdin and
+       read() served it keyboard input instead of the network (wget read the
+       keyboard).  Assert the floor for all three kinds. */
+    {
+        struct process holder;
+        fd_table_init(&holder.fds);
+        int sfd = fd_alloc_socket(&holder.fds, 0);
+        int ffd = fd_alloc(&holder.fds, 0);
+        int pfd = fd_alloc_pipe(&holder.fds, 0, FD_PIPE_READ);
+        KTEST_ASSERT(sfd >= 3 && ffd >= 3 && pfd >= 3);
+        /* Distinct slots, and stdio still untouched. */
+        KTEST_ASSERT(sfd != ffd && ffd != pfd && sfd != pfd);
+        KTEST_ASSERT(fd_type(&holder.fds, 0) == FD_NONE);
+        KTEST_ASSERT(fd_type(&holder.fds, 1) == FD_NONE);
+        KTEST_ASSERT(fd_type(&holder.fds, 2) == FD_NONE);
+        KTEST_ASSERT(fd_type(&holder.fds, sfd) == FD_SOCKET);
+    }
 }

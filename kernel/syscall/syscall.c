@@ -123,22 +123,29 @@ static int64_t sys_write(uint64_t fd, uint64_t buf_virt, uint64_t count)
     /* Resolve the destination once, then stream user data through a kernel
        bounce buffer so no sink ever dereferences user memory directly (which
        would fault the kernel — and the pipe sink holds a lock while writing). */
+    /* Resolve by what the descriptor refers to, not by its number: the serial
+       console is the fallback for an fd 1/2 with nothing installed on it, so a
+       pipe or file redirected onto either one is honoured. */
     enum write_sink sink = SINK_BAD;
     int idx = -1, vfd = -1;
-    if (fd == 1U || fd == 2U) {
-        if (fd == 1U && fds && fd_type(fds, 1) == FD_PIPE_WRITE) {
-            sink = SINK_PIPE; idx = fd_id(fds, 1);
-        } else {
-            sink = SINK_SERIAL;
-        }
-    } else if (!fds) {
-        return -9;
-    } else if (fd_type(fds, (int)fd) == FD_SOCKET) {
+    switch (fds ? fd_type(fds, (int)fd) : FD_NONE) {
+    case FD_PIPE_WRITE:
+        sink = SINK_PIPE;   idx = fd_id(fds, (int)fd);
+        break;
+    case FD_SOCKET:
         sink = SINK_SOCKET; idx = fd_id(fds, (int)fd);
-    } else {
+        break;
+    case FD_FILE:
         vfd = fd_to_vfs(fds, (int)fd);
         if (vfd < 0) return -9;
         sink = SINK_FILE;
+        break;
+    case FD_PIPE_READ:
+        return -9; /* EBADF: the read end is not writable */
+    default:
+        if (fd != 1U && fd != 2U) return -9;
+        sink = SINK_SERIAL;
+        break;
     }
 
     char kbuf[512];
@@ -257,31 +264,39 @@ static int64_t sys_read(uint64_t fd, uint64_t buf_virt, uint64_t count)
 
     fd_table_t *fds = current_fds();
     char kbuf[512];
+    uint32_t chunk = count > sizeof(kbuf) ? (uint32_t)sizeof(kbuf) : (uint32_t)count;
 
-    /* fd 0: stdin (tty) or a pipe redirected onto stdin. One chunk per call. */
-    if (fd == 0) {
-        uint32_t chunk = count > sizeof(kbuf) ? sizeof(kbuf) : (uint32_t)count;
-        int n;
-        if (fds && fd_type(fds, 0) == FD_PIPE_READ) {
-            int pidx = fd_id(fds, 0);
-            while ((n = pipe_read(pidx, kbuf, chunk)) == -2)
-                __asm__ volatile("int $0x20" ::: "memory");
-            if (n < 0) return -1;
-        } else {
-            n = (int)sys_read_stdin(kbuf, chunk);
-        }
+    /* Resolve what the descriptor actually refers to *before* special-casing
+       fd 0.  An open fd always reads from its own object; the console is only
+       the fallback for an fd 0 with nothing installed on it.  Checking fd 0
+       first instead would serve keyboard input to any socket or file that
+       happened to land there. */
+    fd_type_t type = fds ? fd_type(fds, (int)fd) : FD_NONE;
+
+    /* Console (tty): one chunk per call. */
+    if (type == FD_NONE) {
+        if (fd != 0) return -9;
+        int n = (int)sys_read_stdin(kbuf, chunk);
         if (n <= 0) return n;
         if (!copy_to_user((void *)(uintptr_t)buf_virt, kbuf, (uint64_t)n)) return -14;
         return n;
     }
 
-    if (!fds) return -9;
-    fd_type_t type = fd_type(fds, (int)fd);
+    /* Pipe (including one redirected onto stdin): block while empty, one chunk. */
+    if (type == FD_PIPE_READ) {
+        int pidx = fd_id(fds, (int)fd);
+        int n;
+        while ((n = pipe_read(pidx, kbuf, chunk)) == -2)
+            __asm__ volatile("int $0x20" ::: "memory");
+        if (n < 0) return -1;
+        if (n == 0) return 0;
+        if (!copy_to_user((void *)(uintptr_t)buf_virt, kbuf, (uint64_t)n)) return -14;
+        return n;
+    }
 
     /* Socket: block until data or EOF; return one chunk. */
     if (type == FD_SOCKET) {
         int idx = fd_id(fds, (int)fd);
-        uint32_t chunk = count > sizeof(kbuf) ? sizeof(kbuf) : (uint32_t)count;
         int n;
         while ((n = sock_recv(idx, kbuf, chunk)) == 0)
             __asm__ volatile("int $0x20" ::: "memory");
@@ -295,14 +310,14 @@ static int64_t sys_read(uint64_t fd, uint64_t buf_virt, uint64_t count)
     if (vfd < 0) return -9;
     uint64_t done = 0;
     while (done < count) {
-        uint32_t chunk = (count - done) > sizeof(kbuf) ? (uint32_t)sizeof(kbuf)
-                                                       : (uint32_t)(count - done);
-        int64_t n = vfs_read(vfd, kbuf, chunk);
+        uint32_t part = (count - done) > sizeof(kbuf) ? (uint32_t)sizeof(kbuf)
+                                                      : (uint32_t)(count - done);
+        int64_t n = vfs_read(vfd, kbuf, part);
         if (n <= 0) break;
         if (!copy_to_user((void *)(uintptr_t)buf_virt + done, kbuf, (uint64_t)n))
             return done ? (int64_t)done : -14;
         done += (uint64_t)n;
-        if ((uint32_t)n < chunk) break; /* EOF / short read */
+        if ((uint32_t)n < part) break; /* EOF / short read */
     }
     return (int64_t)done;
 }
