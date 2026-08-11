@@ -37,6 +37,15 @@ char input_getchar(void)
     return c;
 }
 
+char input_peek(void)
+{
+    char c = 0;
+    uint64_t f = spinlock_acquire_irqsave(&s_lock);
+    if (s_head != s_tail) c = s_buf[s_head];
+    spinlock_release_irqrestore(&s_lock, f);
+    return c;
+}
+
 bool input_ready(void)
 {
     return s_head != s_tail;

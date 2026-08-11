@@ -82,6 +82,25 @@ static void heap_stress_thread(void *arg)
 	thread_exit();
 }
 
+/* ---- Killing a sleeping thread must be final --------------------------- */
+
+static volatile uint32_t sleeper_resumed;
+static volatile uint32_t sleeper_started;
+
+static void sleeper_victim(void *arg)
+{
+	(void)arg;
+	sleeper_started = 1U;
+	sched_sleep_ms(40);
+	/* Unreachable: the test kills this thread while it is on the sleep list.
+	   The sleeper loop in sched_tick used to set THREAD_READY unconditionally
+	   when the deadline expired, which handed the corpse back to the run queue
+	   and resumed it here — in a process whose struct the parent's waitpid had
+	   already freed. */
+	__sync_add_and_fetch(&sleeper_resumed, 1U);
+	thread_exit();
+}
+
 /* ---- Test runner ------------------------------------------------------- */
 
 void test_sched_run(void)
@@ -150,4 +169,25 @@ void test_sched_run(void)
 	__asm__ volatile("cli" ::: "memory");
 	KTEST_ASSERT(heap_stress_done == HEAP_STRESS_THREADS);
 	KTEST_ASSERT(heap_stress_bad == 0U);
+
+	/* --- THREAD_DEAD is terminal, even for a sleeper --- */
+	sleeper_resumed = 0;
+	sleeper_started = 0;
+
+	__asm__ volatile("sti" ::: "memory");
+	struct thread *victim = thread_create(sleeper_victim, NULL);
+	KTEST_ASSERT(victim != NULL);
+	while (!sleeper_started) {
+		thread_yield();
+	}
+	/* Let it reach sched_sleep_ms and land on the sleep list. */
+	for (uint32_t i = 0; i < 8U; ++i) {
+		thread_yield();
+	}
+	sched_kill(victim);
+	/* Sleep well past the victim's 40 ms deadline: if the kill were not final,
+	   the expiry would run its remaining code and bump the counter. */
+	sched_sleep_ms(200);
+	__asm__ volatile("cli" ::: "memory");
+	KTEST_ASSERT(sleeper_resumed == 0U);
 }

@@ -108,24 +108,58 @@ void process_reap_if_orphaned(struct process *proc)
     process_reap(proc);
 }
 
-/* Block the current thread until `target` exits.  Lock-protected so the wakeup
-   from process_mark_exited cannot be lost between the exited-check and the
-   enqueue (a BLOCKED thread is never re-queued, so a lost wake hangs forever). */
-void process_wait(struct process *target)
+/* Remove t from target's wait queue if it is still linked there.
+   Caller holds proc_wait_lock. */
+static void waitq_remove_locked(struct process *target, struct thread *t)
+{
+    struct thread **p = &target->wait_queue;
+    while (*p) {
+        if (*p == t) {
+            *p = t->wait_next;
+            t->wait_next = NULL;
+            return;
+        }
+        p = &(*p)->wait_next;
+    }
+}
+
+/* Block the current thread until `target` exits or `ms` elapses; returns whether
+   it has exited.  Returning periodically is the point: sys_waitpid has to watch
+   the console for Ctrl+C, and a parent blocked until its child exits can never
+   look — so the check ran exactly once per spawn and Ctrl+C did nothing.
+
+   Enqueueing on the wait queue *and* taking a sleep deadline means two wakeup
+   sources race, which is safe because sched_wake and the sleeper loop both
+   promote only a BLOCKED thread, so the loser cannot enqueue a second time.
+   Registering on the queue before sleeping also keeps the wakeup from being lost
+   between the exited-check and the sleep. */
+bool process_wait_timeout(struct process *target, uint64_t ms)
 {
     struct thread *t = sched_current();
+
     spinlock_acquire(&proc_wait_lock);
-    while (!target->exited) {
-        t->wait_next       = target->wait_queue;
-        target->wait_queue = t;
-        t->state           = THREAD_BLOCKED;
+    if (target->exited) {
         spinlock_release(&proc_wait_lock);
-        /* cli before int $0x20 so the timer cannot preempt between marking
-           BLOCKED and yielding; iretq restores IF, then re-enable. */
-        __asm__ volatile("cli; int $0x20; sti" ::: "memory");
-        spinlock_acquire(&proc_wait_lock);
+        return true;
     }
+    t->wait_next       = target->wait_queue;
+    target->wait_queue = t;
+    /* Tells sched_kill that sleep-list membership alone does not make this thread
+       safe to free while we are also linked here. */
+    t->on_waitq        = true;
     spinlock_release(&proc_wait_lock);
+
+    sched_sleep_ms(ms);
+
+    spinlock_acquire(&proc_wait_lock);
+    /* Unlink unless process_mark_exited already drained us.  wait_next is shared
+       with the mutex wait list, so leaving a stale link here would let the next
+       mutex_lock overwrite it and corrupt this queue. */
+    waitq_remove_locked(target, t);
+    t->on_waitq = false;
+    bool exited = target->exited;
+    spinlock_release(&proc_wait_lock);
+    return exited;
 }
 
 /* Mark a process exited and wake all sys_waitpid waiters.  Setting `exited`
@@ -142,6 +176,9 @@ void process_mark_exited(struct process *proc, int32_t status)
     while (w) {
         struct thread *nxt = w->wait_next;
         w->wait_next = NULL;
+        /* No longer linked here, so sleep-list membership alone is once again
+           enough for sched_kill to free it. */
+        w->on_waitq  = false;
         sched_wake(w);
         w = nxt;
     }
@@ -223,10 +260,24 @@ void process_kill(struct process *proc)
 {
     if (!proc || proc->exited) return;
     process_close_all_fds(proc);
+    /* Kill the thread *before* publishing the exit status.  Marking exited wakes
+       the parent's waitpid, which reaps the process and frees this struct — so
+       doing it first left a live thread pointing at freed memory.  sched_kill
+       makes THREAD_DEAD terminal, so once it returns the victim can never run
+       again no matter where it was blocked. */
+    if (proc->thread) {
+        sched_kill(proc->thread);
+        /* Forget the thread: sched_kill may hand it straight to the reaper, so
+           this pointer can dangle from here on.  Clearing it also makes a second,
+           racing process_kill a no-op rather than a use-after-free. */
+        proc->thread = NULL;
+    }
     /* Record exit status and wake any sys_waitpid callers (lock-protected). */
     process_mark_exited(proc, 130);   /* 128 + SIGINT */
-    /* Mark the process thread as dead. */
-    if (proc->thread) proc->thread->state = THREAD_DEAD;
+    /* Nothing may ever waitpid an orphan, so collect it here while `proc` is
+       still known to be live.  The thread reaper used to do this from
+       t->process, which the parent's waitpid could have freed first. */
+    process_reap_if_orphaned(proc);
 }
 
 static uint32_t ps_fmt_uint(char *out, uint32_t val, uint32_t width)

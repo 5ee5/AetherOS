@@ -30,6 +30,27 @@ static struct thread *rq_tail;
 static volatile uint64_t g_ticks;
 static struct thread *sleep_head;  /* protected by rq_lock */
 
+/* Threads killed while off-CPU, waiting to be freed by the next tick.  A thread
+   that dies while running is handled by reap_pending[cpu] instead: it is still
+   executing on its own stack, so it cannot be freed until it has switched off.
+   Protected by rq_lock. */
+static struct thread *zombie_head;
+
+/* Unlink t from the sleep list if it is on it.  Returns true if it was — the
+   caller then knows the thread was blocked in sched_sleep_ms and is therefore on
+   no other queue, which is what makes it safe to free.  Caller holds rq_lock. */
+static bool sleep_unlink_locked(struct thread *t)
+{
+	for (struct thread **sp = &sleep_head; *sp; sp = &(*sp)->sleep_next) {
+		if (*sp == t) {
+			*sp = t->sleep_next;
+			t->sleep_next = NULL;
+			return true;
+		}
+	}
+	return false;
+}
+
 static void rq_add(struct thread *t)
 {
 	t->run_next = NULL;
@@ -136,8 +157,51 @@ void sched_wake(struct thread *t)
 		__asm__ volatile("pause" ::: "memory");
 	}
 	uint64_t f = spinlock_acquire_irqsave(&rq_lock);
-	t->state = THREAD_READY;
-	rq_add(t);
+	/* Only a BLOCKED thread may be made runnable, and this is the single place
+	   that decides it.  Two cases the old unconditional store got wrong:
+	   THREAD_DEAD is terminal, so a killed thread must never be resurrected by
+	   a mutex_unlock or an exit notification that still holds a pointer to it;
+	   and a thread already READY (woken by another source — a wait queue and a
+	   sleep deadline can both fire) must not be enqueued a second time. */
+	if (t->state == THREAD_BLOCKED) {
+		sleep_unlink_locked(t);
+		t->state = THREAD_READY;
+		rq_add(t);
+	}
+	spinlock_release_irqrestore(&rq_lock, f);
+}
+
+/* Terminate a thread that may be blocked, sleeping, or running on another CPU.
+   Taking rq_lock (rather than storing THREAD_DEAD from thread context, as
+   process_kill used to) means this cannot race a state transition in sched_tick,
+   and lets us pull a sleeper off the sleep list in the same breath — otherwise
+   the deadline would later fire and hand the corpse back to the run queue. */
+void sched_kill(struct thread *t)
+{
+	if (!t) return;
+	uint64_t f = spinlock_acquire_irqsave(&rq_lock);
+	if (t->state == THREAD_DEAD) {
+		spinlock_release_irqrestore(&rq_lock, f);
+		return;
+	}
+	bool was_sleeping = sleep_unlink_locked(t);
+	bool blocked      = (t->state == THREAD_BLOCKED);
+	t->state = THREAD_DEAD;
+	/* Free it here only if it was purely asleep, i.e. on the sleep list and on no
+	   wait queue: nothing else then holds a pointer to it.  A thread linked in a
+	   mutex or process wait queue (via wait_next) stays allocated and simply never
+	   runs again — sched_wake refuses a DEAD thread, so whoever pops it later just
+	   drops it.  Freeing it instead would leave that queue pointing into freed
+	   memory.  The struct and its 64 KiB stack leak: a bounded, deliberate cost
+	   next to the use-after-free the old code produced.  A RUNNING or READY thread
+	   is reaped by sched_tick, which already handles both. */
+	if (was_sleeping && !t->on_waitq && !t->on_cpu) {
+		t->sleep_next = zombie_head;
+		zombie_head   = t;
+	} else if (blocked) {
+		serial_write("sched: killed a thread blocked in a wait queue; "
+		             "struct and stack leaked\n");
+	}
 	spinlock_release_irqrestore(&rq_lock, f);
 }
 
@@ -158,13 +222,33 @@ uint64_t sched_tick(uint64_t old_rsp)
 			vmm_space_destroy(dead->cr3);
 			dead->cr3 = 0;
 		}
-		/* If nothing can ever waitpid this process (no parent, or the parent
-		   is gone), free its struct here — otherwise it sits in the process
-		   table as a permanent zombie.  A process with a live parent is left
-		   for that parent to collect. */
-		process_reap_if_orphaned((struct process *)dead->process);
+		/* The process struct is *not* touched here: t->process may already
+		   have been freed by a parent's waitpid, and reading it to decide
+		   orphan status was a use-after-free.  sys_exit and process_kill now
+		   collect an orphan themselves, while the process is still live. */
 		kfree(dead->kstack);
 		kfree(dead);
+	}
+
+	/* Free one thread that was killed while off-CPU (see sched_kill).  One per
+	   tick keeps this off the hot path and bounded; the list drains as ticks
+	   pass.  Plain acquire: the ISR path already runs with IF clear. */
+	{
+		spinlock_acquire(&rq_lock);
+		struct thread *z = zombie_head;
+		if (z != NULL) {
+			zombie_head   = z->sleep_next;
+			z->sleep_next = NULL;
+		}
+		spinlock_release(&rq_lock);
+		if (z != NULL) {
+			if (z->is_user && z->cr3 != 0) {
+				vmm_space_destroy(z->cr3);
+				z->cr3 = 0;
+			}
+			kfree(z->kstack);
+			kfree(z);
+		}
 	}
 
 	struct thread *cur = cpu_current[cpu];
@@ -185,8 +269,19 @@ uint64_t sched_tick(uint64_t old_rsp)
 		if (st->sleep_deadline <= g_ticks) {
 			*sp = st->sleep_next;
 			st->sleep_next = NULL;
-			st->state = THREAD_READY;
-			rq_add(st);
+			/* Unlink unconditionally, but only a still-BLOCKED thread goes
+			   back on the run queue.  A DEAD one was killed while sleeping
+			   and must stay dead — re-queueing it used to resurrect a
+			   process whose struct the parent's waitpid had already freed,
+			   and it resumed user code through a dangling pointer.  A thread
+			   already READY was woken by another source and is queued. */
+			if (st->state == THREAD_BLOCKED) {
+				st->state = THREAD_READY;
+				rq_add(st);
+			} else if (st->state == THREAD_DEAD && !st->on_cpu) {
+				st->sleep_next = zombie_head;
+				zombie_head    = st;
+			}
 		} else {
 			sp = &st->sleep_next;
 		}
@@ -201,7 +296,17 @@ uint64_t sched_tick(uint64_t old_rsp)
 		reap_pending[cpu] = cur;
 	}
 
+	/* Never dispatch a corpse.  A thread killed while sitting READY in the run
+	   queue is still linked here; dispatching it would iretq straight back into
+	   a process that has already been torn down.  Drop it and take the next. */
 	struct thread *next = rq_take();
+	while (next != NULL && next->state == THREAD_DEAD) {
+		if (!next->on_cpu) {
+			next->sleep_next = zombie_head;
+			zombie_head      = next;
+		}
+		next = rq_take();
+	}
 	if (next == NULL) {
 		next = cpu_idle[cpu];
 	}

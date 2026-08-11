@@ -11,8 +11,14 @@ void sched_add(struct thread *t);
 struct thread  *sched_current(void);
 struct process *sched_current_process(void);
 
-/* Wake a blocked thread: mark READY and re-enqueue. */
+/* Wake a blocked thread: mark READY and re-enqueue.  Ignores a thread that is
+   not BLOCKED, so a DEAD thread is never resurrected and one already runnable is
+   never enqueued twice. */
 void sched_wake(struct thread *t);
+
+/* Terminate a thread wherever it is: running, READY, sleeping, or blocked.
+   THREAD_DEAD is terminal — the thread never executes again. */
+void sched_kill(struct thread *t);
 
 /* Called from the timer ISR (assembly).
    old_rsp: RSP after saving all GP registers onto the current stack.

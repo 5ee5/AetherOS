@@ -26,6 +26,11 @@ struct thread {
 	uint64_t       cr3;        /* PML4 phys for user thread (0 = kernel) */
 	struct thread *run_next;     /* run queue linkage */
 	struct thread *wait_next;    /* wait/blocked queue linkage */
+	/* True while linked into a process wait_queue via wait_next.  Such a thread
+	   is also on the sleep list (process_wait_timeout blocks on both), so
+	   sched_kill cannot free it on the strength of sleep-list membership alone —
+	   the wait queue would be left pointing at freed memory. */
+	bool           on_waitq;
 	struct thread *sleep_next;   /* sleep queue linkage */
 	uint64_t       sleep_deadline; /* tick at which to wake (0 = not sleeping) */
 	void          *process;      /* owning struct process, or NULL */

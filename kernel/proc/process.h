@@ -37,7 +37,7 @@ struct process *process_create_from_result(const elf_load_result_t *r);
 void process_start(struct process *proc);
 
 /* Block the current thread until `proc` exits (used by sys_waitpid). */
-void process_wait(struct process *proc);
+bool process_wait_timeout(struct process *proc, uint64_t ms);
 
 /* Mark `proc` exited with `status` and wake all waiters (lock-protected). */
 void process_mark_exited(struct process *proc, int32_t status);

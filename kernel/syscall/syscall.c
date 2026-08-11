@@ -109,6 +109,9 @@ void syscall_init(void)
 /* waitpid options (Linux value). */
 #define WNOHANG 1U
 
+/* How often a blocked waitpid wakes to look for Ctrl+C on the console. */
+#define CTRLC_POLL_MS 50U
+
 static fd_table_t *current_fds(void);
 
 /* Write sink resolution. */
@@ -231,17 +234,27 @@ static int64_t sys_open(uint64_t path_virt, uint64_t flags, uint64_t mode)
     return fd;
 }
 
+/* Move anything waiting in the UART into the shared input ring.
+   Console input merges serial (COM1) and any keyboard (PS/2 or USB HID), so the
+   shell works whether the machine has a serial port, only a USB keyboard, or
+   both.  Draining serial *into the ring* rather than reading the two sources
+   side by side leaves exactly one ordered queue with one consumer: a watcher
+   that only wants to spot Ctrl+C can then peek it without dequeuing a keystroke
+   that belongs to whoever is really reading the console. */
+static void console_fill(void)
+{
+    for (char c = serial_read_char(); c; c = serial_read_char())
+        input_push(c);
+}
+
 static int64_t sys_read_stdin(void *buf, uint32_t count)
 {
     uint8_t *p = (uint8_t *)buf;
     uint32_t n = 0;
     while (n < count) {
         __asm__ volatile("sti" ::: "memory");   /* allow timer IRQ so int $0x20 yields */
-        /* Console input merges serial (COM1) and any keyboard (PS/2 or USB HID,
-           both feeding the shared input ring), so the shell works whether the
-           machine has a serial port or only a USB keyboard. */
-        char c = serial_read_char();
-        if (!c) c = input_getchar();
+        console_fill();
+        char c = input_getchar();
         if (!c) {
             __asm__ volatile("int $0x20" ::: "memory");  /* yield, stay READY */
             continue;
@@ -366,6 +379,11 @@ static int64_t sys_exit(uint64_t status)
         process_orphan_children(proc);
         /* Record exit status and wake sys_waitpid callers (lock-protected). */
         process_mark_exited(proc, (int32_t)(status & 0xffU));
+        /* Collect ourselves if no one can ever waitpid us (no parent, or it is
+           gone), while `proc` is still known to be live.  The thread reaper used
+           to do this via t->process, which a parent's waitpid could already have
+           freed. */
+        process_reap_if_orphaned(proc);
     }
 
     /* The address space is destroyed by the scheduler reaper once this thread
@@ -402,16 +420,21 @@ static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
     if ((options & WNOHANG) && !target->exited) return 0;
 
     while (!target->exited) {
-        /* Non-blocking peek (serial or keyboard): Ctrl+C kills the process. */
-        char c = serial_read_char();
-        if (!c) c = input_getchar();
-        if (c == 0x03) {
+        /* Watch for Ctrl+C without consuming anything else: the child is reading
+           the same console, and this loop used to dequeue a character per pass
+           and throw away whatever was not 0x03 — so a keystroke that arrived
+           while the parent was polling simply vanished (typing `ps` reached the
+           shell as `s`).  Peek, and dequeue only the byte we act on. */
+        console_fill();
+        if (input_peek() == 0x03) {
+            (void)input_getchar();
             process_kill(target);
             serial_write("^C\n");
             break;
         }
-        /* Block until the target exits (lock-protected; no lost wakeup). */
-        process_wait(target);
+        /* Block until the target exits, but wake often enough that the Ctrl+C
+           check above actually gets to run while the child is alive. */
+        process_wait_timeout(target, CTRLC_POLL_MS);
     }
     if (status_virt) {
         int32_t st = target->exit_status << 8;

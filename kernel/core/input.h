@@ -12,6 +12,11 @@ void input_push(char c);
 /* Non-blocking: returns the next character, or 0 if the ring is empty. */
 char input_getchar(void);
 
+/* Non-blocking look at the next character without consuming it (0 if empty).
+   Lets a Ctrl+C watcher inspect the queue without stealing a keystroke from
+   whoever is actually reading the console. */
+char input_peek(void);
+
 /* True if a character is available. */
 bool input_ready(void);
 
