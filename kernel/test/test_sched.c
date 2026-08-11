@@ -101,6 +101,26 @@ static void sleeper_victim(void *arg)
 	thread_exit();
 }
 
+/* ---- A kill must not strand a held lock -------------------------------- */
+
+static volatile uint32_t defer_ready;
+static volatile uint32_t defer_release;
+static volatile uint32_t defer_done;
+static mutex_t defer_mutex = MUTEX_INIT;
+
+static void defer_victim(void *arg)
+{
+	(void)arg;
+	mutex_lock(&defer_mutex);
+	defer_ready = 1U;
+	while (!defer_release) {
+		thread_yield();
+	}
+	mutex_unlock(&defer_mutex);
+	defer_done = 1U;
+	thread_exit();
+}
+
 /* ---- Test runner ------------------------------------------------------- */
 
 void test_sched_run(void)
@@ -190,4 +210,32 @@ void test_sched_run(void)
 	sched_sleep_ms(200);
 	__asm__ volatile("cli" ::: "memory");
 	KTEST_ASSERT(sleeper_resumed == 0U);
+
+	/* --- Killing a lock holder is deferred, not immediate ---
+	   Stopping a thread dead while it holds a mutex left that mutex locked
+	   forever, and a victim killed inside the VFS wedged the filesystem for every
+	   other process.  sched_kill must refuse, letting the thread reach a point
+	   where it holds nothing. */
+	defer_ready = defer_release = defer_done = 0;
+
+	__asm__ volatile("sti" ::: "memory");
+	struct thread *holder = thread_create(defer_victim, NULL);
+	KTEST_ASSERT(holder != NULL);
+	while (!defer_ready) {
+		thread_yield();
+	}
+	/* The victim is holding defer_mutex at this point. */
+	KTEST_ASSERT(sched_kill(holder) == false);   /* deferred */
+	KTEST_ASSERT(holder->kill_pending);
+	KTEST_ASSERT(holder->state != THREAD_DEAD);  /* still alive to unlock */
+
+	defer_release = 1U;
+	while (!defer_done) {
+		thread_yield();
+	}
+	__asm__ volatile("cli" ::: "memory");
+	/* It released the mutex on its way out, so the lock is usable again — this is
+	   the assertion the filesystem wedge would have failed. */
+	KTEST_ASSERT(mutex_try_lock(&defer_mutex));
+	mutex_unlock(&defer_mutex);
 }

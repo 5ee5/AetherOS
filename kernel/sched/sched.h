@@ -1,6 +1,7 @@
 #ifndef KERNEL_SCHED_SCHED_H
 #define KERNEL_SCHED_SCHED_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 struct thread;
@@ -17,8 +18,13 @@ struct process *sched_current_process(void);
 void sched_wake(struct thread *t);
 
 /* Terminate a thread wherever it is: running, READY, sleeping, or blocked.
-   THREAD_DEAD is terminal — the thread never executes again. */
-void sched_kill(struct thread *t);
+   THREAD_DEAD is terminal — the thread never executes again.
+
+   Returns true if the thread is dead on return.  Returns false when the kill had
+   to be deferred because the thread holds a kernel lock: it keeps running until
+   the current syscall returns and then terminates itself, so the caller must not
+   tear down anything the thread is still using. */
+bool sched_kill(struct thread *t);
 
 /* Called from the timer ISR (assembly).
    old_rsp: RSP after saving all GP registers onto the current stack.

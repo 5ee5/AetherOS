@@ -286,6 +286,10 @@ static int64_t sys_read_stdin(void *buf, uint32_t count)
 {
     uint8_t *p = (uint8_t *)buf;
     uint32_t n = 0;
+    /* Announce that this process owns the console, so an ancestor polling for
+       Ctrl+C does not mistake it for a job to kill (see struct process). */
+    struct process *self = sched_current_process();
+    if (self) self->in_console_read = true;
     while (n < count) {
         __asm__ volatile("sti" ::: "memory");   /* allow timer IRQ so int $0x20 yields */
         console_fill();
@@ -297,11 +301,13 @@ static int64_t sys_read_stdin(void *buf, uint32_t count)
         if (c == '\r') c = '\n';
         if (c == 4) {            /* Ctrl+D = EOF */
             if (n > 0) break;
+            if (self) self->in_console_read = false;
             return 0;
         }
         p[n++] = (uint8_t)c;
         if (c == '\n') break;
     }
+    if (self) self->in_console_read = false;
     return (int64_t)n;
 }
 
@@ -461,6 +467,7 @@ static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
        lifetime of the shell. */
     if ((options & WNOHANG) && !target->exited) return 0;
 
+    caller->in_waitpid = true;
     while (!target->exited) {
         /* Watch for Ctrl+C without consuming anything else: the child is reading
            the same console, and this loop used to dequeue a character per pass
@@ -468,16 +475,24 @@ static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
            while the parent was polling simply vanished (typing `ps` reached the
            shell as `s`).  Peek, and dequeue only the byte we act on. */
         console_fill();
-        if (input_peek() == 0x03) {
+        /* Claim a Ctrl+C only for a target that is the foreground job: one that is
+           neither waiting on a child of its own nor reading the console itself.
+           Otherwise, in a login -> shell -> job chain, login would race the shell
+           for the keystroke and kill the shell out from under it. */
+        if (input_peek() == 0x03 && !target->in_waitpid && !target->in_console_read) {
             (void)input_getchar();
             process_kill(target);
             serial_write("^C\n");
-            break;
+            /* Deliberately no break: if the victim was inside the kernel holding
+               a lock, the kill is deferred and it publishes its own exit status
+               when it unwinds.  Looping until `exited` means we never reap the
+               struct while the thread is still using it. */
         }
         /* Block until the target exits, but wake often enough that the Ctrl+C
            check above actually gets to run while the child is alive. */
         process_wait_timeout(target, CTRLC_POLL_MS);
     }
+    caller->in_waitpid = false;
     if (status_virt) {
         int32_t st = target->exit_status << 8;
         copy_to_user((void *)(uintptr_t)status_virt, &st, sizeof(st)); /* best-effort */
@@ -928,8 +943,9 @@ static int64_t sys_dns(uint64_t host_virt, uint64_t ip_out_virt)
     return 0;
 }
 
-int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
-                         uint64_t a3, uint64_t a4)
+/* Wrapped by syscall_dispatch, which handles a kill that arrived mid-syscall. */
+static int64_t syscall_do(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
+                          uint64_t a3, uint64_t a4)
 {
     (void)a4;
     switch (nr) {
@@ -1038,4 +1054,26 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
         serial_write("\n");
         return -38;   /* -ENOSYS */
     }
+}
+
+int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
+                         uint64_t a3, uint64_t a4)
+{
+    int64_t ret = syscall_do(nr, a0, a1, a2, a3, a4);
+
+    /* A kill that arrived while this thread held a kernel lock was deferred to
+       here (see sched_kill).  Killing it on the spot would have left the lock
+       held forever — wedging the filesystem for every process — and releasing the
+       lock on its behalf would be worse, publishing whatever half-finished state
+       the operation was in.  Letting the syscall run to completion means every
+       lock is released and the data structures are consistent; the process is
+       already marked exited, so nothing here touches it. */
+    struct thread *t = sched_current();
+    if (t && t->kill_pending) {
+        /* process_kill left the process untouched so that nothing could free it
+           while we were still running, so do the whole teardown here: fds,
+           children, exit status.  130 = 128 + SIGINT, matching process_kill. */
+        sys_exit(130);   /* never returns */
+    }
+    return ret;
 }

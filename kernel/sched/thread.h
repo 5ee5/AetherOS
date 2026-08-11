@@ -31,6 +31,14 @@ struct thread {
 	   sched_kill cannot free it on the strength of sleep-list membership alone —
 	   the wait queue would be left pointing at freed memory. */
 	bool           on_waitq;
+	/* Number of mutexes this thread currently holds.  sched_kill refuses to
+	   terminate a thread with any held, because the lock would never be released
+	   (wedging every other user of it) and releasing it on the thread's behalf
+	   would publish half-finished state. */
+	uint32_t       locks_held;
+	/* Set when such a kill was deferred; the thread dies at the next syscall
+	   return, by which point it holds nothing. */
+	bool           kill_pending;
 	struct thread *sleep_next;   /* sleep queue linkage */
 	uint64_t       sleep_deadline; /* tick at which to wake (0 = not sleeping) */
 	void          *process;      /* owning struct process, or NULL */

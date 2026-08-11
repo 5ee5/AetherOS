@@ -31,6 +31,7 @@ void mutex_lock(mutex_t *m)
 	}
 	m->locked = true;
 	m->owner  = sched_current();
+	if (m->owner) m->owner->locks_held++;
 	spinlock_release(&m->lock);
 }
 
@@ -38,6 +39,7 @@ void mutex_unlock(mutex_t *m)
 {
 	spinlock_acquire(&m->lock);
 	m->locked = false;
+	if (m->owner && m->owner->locks_held > 0) m->owner->locks_held--;
 	m->owner  = NULL;
 	if (m->waiters != NULL) {
 		struct thread *woken = m->waiters;
@@ -59,6 +61,7 @@ bool mutex_try_lock(mutex_t *m)
 	}
 	m->locked = true;
 	m->owner  = sched_current();
+	if (m->owner) m->owner->locks_held++;
 	spinlock_release(&m->lock);
 	return true;
 }

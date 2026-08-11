@@ -205,6 +205,8 @@ struct process *process_create_from_result(const elf_load_result_t *r)
     proc->exited      = false;
     proc->exit_status = 0;
     proc->wait_queue  = NULL;
+    proc->in_waitpid      = false;
+    proc->in_console_read = false;
     proc->name[0]     = '\0';
     struct process *parent = sched_current_process();
     proc->ppid        = parent ? parent->pid : 0;   /* 0 = spawned by the kernel */
@@ -281,19 +283,21 @@ void process_close_all_fds(struct process *proc)
 void process_kill(struct process *proc)
 {
     if (!proc || proc->exited) return;
+
+    /* If the victim is inside the kernel holding a lock, sched_kill only flags it
+       and it dies at its next syscall return.  Leave the process completely alone
+       in that case: publishing the exit status here would let the parent's waitpid
+       reap and free this struct while the thread is still running with a pointer
+       to it.  The thread performs the whole teardown itself when it unwinds. */
+    if (proc->thread && !sched_kill(proc->thread)) return;
+
     process_close_all_fds(proc);
-    /* Kill the thread *before* publishing the exit status.  Marking exited wakes
-       the parent's waitpid, which reaps the process and frees this struct — so
-       doing it first left a live thread pointing at freed memory.  sched_kill
-       makes THREAD_DEAD terminal, so once it returns the victim can never run
-       again no matter where it was blocked. */
-    if (proc->thread) {
-        sched_kill(proc->thread);
-        /* Forget the thread: sched_kill may hand it straight to the reaper, so
-           this pointer can dangle from here on.  Clearing it also makes a second,
-           racing process_kill a no-op rather than a use-after-free. */
-        proc->thread = NULL;
-    }
+    /* The thread is already dead (sched_kill above ran before anything else, so
+       the parent's waitpid could not free this struct under a live thread).
+       Forget it: sched_kill may have handed it straight to the reaper, so the
+       pointer can dangle from here on, and clearing it makes a second racing
+       process_kill a no-op rather than a use-after-free. */
+    proc->thread = NULL;
     /* Record exit status and wake any sys_waitpid callers (lock-protected). */
     process_mark_exited(proc, 130);   /* 128 + SIGINT */
     /* Nothing may ever waitpid an orphan, so collect it here while `proc` is

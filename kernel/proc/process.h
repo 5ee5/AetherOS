@@ -24,6 +24,14 @@ struct process {
     volatile bool    exited;
     volatile int32_t exit_status;
     struct thread   *wait_queue;  /* threads blocked in sys_waitpid */
+    /* Which end of the console this process is currently sitting on.  Ctrl+C is
+       polled by every sys_waitpid caller, so in a login -> shell -> job chain
+       several processes watch the same console at once; without these, whichever
+       waiter peeked first won and login could kill the shell instead of the job.
+       A waiter only claims a Ctrl+C when its target is doing neither — i.e. the
+       target is the foreground job rather than an intermediate shell. */
+    volatile bool    in_waitpid;
+    volatile bool    in_console_read;
     char             cwd[256];
     char             name[32];    /* basename of spawned ELF path */
 };

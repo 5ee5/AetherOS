@@ -176,13 +176,25 @@ void sched_wake(struct thread *t)
    process_kill used to) means this cannot race a state transition in sched_tick,
    and lets us pull a sleeper off the sleep list in the same breath — otherwise
    the deadline would later fire and hand the corpse back to the run queue. */
-void sched_kill(struct thread *t)
+bool sched_kill(struct thread *t)
 {
-	if (!t) return;
+	if (!t) return true;
 	uint64_t f = spinlock_acquire_irqsave(&rq_lock);
 	if (t->state == THREAD_DEAD) {
 		spinlock_release_irqrestore(&rq_lock, f);
-		return;
+		return true;
+	}
+	/* Never kill a thread that holds a kernel lock.  Stopping it dead left the
+	   lock held forever — a victim killed inside the VFS wedged the filesystem for
+	   every other process — and releasing the lock on its behalf would be worse,
+	   publishing whatever half-finished state the operation was in.  Instead flag
+	   it: the syscall runs to completion, releases everything, and the thread dies
+	   on the way out (see syscall_dispatch). */
+	if (t->locks_held > 0) {
+		t->kill_pending = true;
+		spinlock_release_irqrestore(&rq_lock, f);
+		serial_write("sched: kill deferred to syscall return (holds a lock)\n");
+		return false;
 	}
 	bool was_sleeping = sleep_unlink_locked(t);
 	bool blocked      = (t->state == THREAD_BLOCKED);
@@ -203,6 +215,7 @@ void sched_kill(struct thread *t)
 		             "struct and stack leaked\n");
 	}
 	spinlock_release_irqrestore(&rq_lock, f);
+	return true;
 }
 
 uint64_t sched_tick(uint64_t old_rsp)

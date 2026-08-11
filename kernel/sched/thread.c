@@ -66,6 +66,8 @@ static struct thread *alloc_thread(void)
 	t->run_next   = NULL;
 	t->wait_next  = NULL;
 	t->on_waitq   = false;
+	t->locks_held = 0;
+	t->kill_pending = false;
 	t->on_cpu     = false;
 	/* kmalloc does not zero, so these must be set explicitly.  `process` in
 	   particular is read by sched_current_process() on every kernel thread;
