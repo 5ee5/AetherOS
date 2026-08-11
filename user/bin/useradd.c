@@ -1,12 +1,8 @@
+#include <crypt.h>
+#include <pwdb.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-
-#define PASSWD_FILE "/etc/passwd"
-#define BUF_SZ 2048
-
-static char s_buf[BUF_SZ];
 
 int main(int argc, char **argv)
 {
@@ -20,62 +16,49 @@ int main(int argc, char **argv)
         puts("useradd: invalid username");
         return 1;
     }
-
-    /* Read /etc/passwd to check for duplicate and find max uid. */
-    int fd = open(PASSWD_FILE, 0, 0);
-    if (fd < 0) { puts("useradd: cannot open /etc/passwd"); return 1; }
-    long n = read(fd, s_buf, BUF_SZ - 1); close(fd);
-    if (n < 0) n = 0;
-    s_buf[n] = '\0';
-
-    uid_t max_uid = 999;
-    char *p = s_buf;
-    while (*p) {
-        char *name = p;
-        char *c1 = strchr(p, ':');    if (!c1) break; *c1 = '\0';
-        char *pass = c1 + 1;
-        char *c2 = strchr(pass, ':'); if (!c2) break; *c2 = '\0';
-        char *uid_s = c2 + 1;
-        char *c3 = strchr(uid_s, ':'); if (!c3) break; *c3 = '\0';
-        char *rest = c3 + 1;
-        char *nl = strchr(rest, '\n'); if (nl) *nl = '\0';
-
-        if (strcmp(name, username) == 0) {
-            printf("useradd: user '%s' already exists\n", username);
-            return 1;
-        }
-
-        uid_t u = (uid_t)atoi(uid_s);
-        if (u >= 1000 && u > max_uid) max_uid = u;
-
-        p = nl ? nl + 1 : rest + strlen(rest);
+    if (strlen(username) >= PW_NAME_MAX) {
+        puts("useradd: username too long");
+        return 1;
     }
 
-    uid_t new_uid = max_uid + 1;
-    if (new_uid < 1000) new_uid = 1000;
+    pwent_t existing;
+    if (pw_by_name(username, &existing) == 0) {
+        printf("useradd: user '%s' already exists\n", username);
+        return 1;
+    }
 
-    /* Create home directory /home/<username>. */
-    static char home[128];
-    /* Ensure /home exists. */
+    uid_t max_uid = pw_max_uid();
+    uid_t new_uid = (max_uid < 1000U) ? 1000U : max_uid + 1U;
+
+    pwent_t e;
+    strncpy(e.name, username, sizeof(e.name) - 1);
+    e.name[sizeof(e.name) - 1] = '\0';
+    e.uid = new_uid;
+    e.gid = new_uid;
+    snprintf(e.home, sizeof(e.home), "/home/%s", username);
+
     mkdir("/home", 0);
-    snprintf(home, sizeof(home), "/home/%s", username);
-    if (mkdir(home, 0) < 0) {
-        printf("useradd: warning: could not create %s\n", home);
+    if (mkdir(e.home, 0) < 0) {
+        printf("useradd: warning: could not create %s\n", e.home);
     } else {
-        chown(home, new_uid, new_uid);
+        chown(e.home, new_uid, new_uid);
     }
 
-    /* Append new entry to /etc/passwd with empty password. */
-    fd = open(PASSWD_FILE, O_WRONLY | O_APPEND, 0);
-    if (fd < 0) { puts("useradd: cannot write /etc/passwd"); return 1; }
+    if (pw_add(&e) != 0) {
+        puts("useradd: cannot write /etc/passwd");
+        return 1;
+    }
 
-    static char line[256];
-    long llen = (long)snprintf(line, sizeof(line), "%s::%u:%u:%s\n",
-                                username, new_uid, new_uid, home);
-    write(fd, line, llen);
-    close(fd);
+    /* Create the account LOCKED.  It used to be created with an empty password,
+       which meant anyone could log in as it without one — and then use sudo to
+       become root.  A locked account cannot be logged into at all until root
+       gives it a password with `passwd <user>`. */
+    if (sh_set(username, CRYPT_LOCKED) != 0) {
+        puts("useradd: cannot write /etc/shadow (account left locked)");
+        return 1;
+    }
 
-    printf("User '%s' created (uid=%u). Use 'passwd %s' to set a password.\n",
-           username, new_uid, username);
+    printf("User '%s' created (uid=%u), login disabled.\n", username, new_uid);
+    printf("Run 'passwd %s' to set a password and enable it.\n", username);
     return 0;
 }

@@ -1,92 +1,57 @@
+#include <crypt.h>
+#include <pwdb.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdlib.h>
 #include <unistd.h>
 
-#define PASSWD_FILE "/etc/passwd"
-#define BUF_SZ 2048
+/* Burned when the account does not exist, so a bad username costs the same time
+   as a bad password and the prompt does not leak which accounts are real. */
+#define DUMMY_HASH "$A1$xxxxxxxx$" \
+    "0000000000000000000000000000000000000000000000000000000000000000"
 
-static char s_buf[BUF_SZ];
-
-/* Parse /etc/passwd (name:password:uid:gid:home) for username.
-   Returns 0 on success, fills out fields. */
-static int lookup_user(const char *username, char *out_pass,
-                       uid_t *out_uid, gid_t *out_gid, char *out_home)
+static long read_line(char *buf, long maxlen)
 {
-    int fd = open(PASSWD_FILE, 0, 0);
-    if (fd < 0) return -1;
-    long n = read(fd, s_buf, BUF_SZ - 1);
-    close(fd);
-    if (n <= 0) return -1;
-    s_buf[n] = '\0';
-
-    char *p = s_buf;
-    while (*p) {
-        char *name = p;
-        char *c1 = strchr(p, ':');   if (!c1) break; *c1 = '\0';
-        char *pass = c1 + 1;
-        char *c2 = strchr(pass, ':'); if (!c2) break; *c2 = '\0';
-        char *uid_s = c2 + 1;
-        char *c3 = strchr(uid_s, ':'); if (!c3) break; *c3 = '\0';
-        char *gid_s = c3 + 1;
-        char *c4 = strchr(gid_s, ':'); if (!c4) break; *c4 = '\0';
-        char *home = c4 + 1;
-        char *nl = strchr(home, '\n'); if (nl) *nl = '\0';
-
-        if (strcmp(name, username) == 0) {
-            strncpy(out_pass, pass, 63); out_pass[63] = '\0';
-            *out_uid = (uid_t)atoi(uid_s);
-            *out_gid = (gid_t)atoi(gid_s);
-            strncpy(out_home, home, 255); out_home[255] = '\0';
-            return 0;
-        }
-
-        p = nl ? nl + 1 : home + strlen(home);
-    }
-    return -1;
+    long n = read(0, buf, (size_t)maxlen - 1);
+    if (n < 0) n = 0;
+    if (n > 0 && buf[n - 1] == '\n') n--;
+    buf[n] = '\0';
+    return n;
 }
 
 int main(void)
 {
-    static char username[64];
-    static char password[64];
-    static char stored_pass[64];
-    static char home[256];
+    static char username[PW_NAME_MAX];
+    static char password[128];
+    static char stored[CRYPT_MAX];
 
     for (;;) {
         printf("\nAetherOS login: ");
-
-        long n = read(0, username, sizeof(username) - 1);
-        if (n <= 0) continue;
-        if (username[n - 1] == '\n') n--;
-        username[n] = '\0';
-        if (n == 0) continue;
+        if (read_line(username, sizeof(username)) == 0) continue;
 
         printf("Password: ");
-        long pn = read(0, password, sizeof(password) - 1);
-        if (pn < 0) pn = 0;
-        if (pn > 0 && password[pn - 1] == '\n') pn--;
-        password[pn] = '\0';
+        read_line(password, sizeof(password));
 
-        uid_t uid;
-        gid_t gid;
-        if (lookup_user(username, stored_pass, &uid, &gid, home) < 0) {
-            puts("Login incorrect.");
-            continue;
-        }
+        pwent_t pw;
+        int known = (pw_by_name(username, &pw) == 0) &&
+                    (sh_get(username, stored, sizeof(stored)) == 0);
+        int ok = crypt_verify(password, known ? stored : DUMMY_HASH) && known;
 
-        /* Empty stored password means no password required. */
-        if (stored_pass[0] != '\0' && strcmp(password, stored_pass) != 0) {
+        /* Don't leave the cleartext sitting in the static buffer afterwards. */
+        memset(password, 0, sizeof(password));
+
+        if (!ok) {
+            /* One message for every failure: unknown user, wrong password, and
+               locked account are indistinguishable from out here. */
             puts("Login incorrect.");
             continue;
         }
 
         printf("Welcome to AetherOS, %s!\n", username);
 
-        if (home[0]) chdir(home);
+        if (pw.home[0]) chdir(pw.home);
 
         char *argv[] = { "shell", NULL };
-        pid_t pid = spawn_as("/bin/shell", argv, uid, gid);
+        pid_t pid = spawn_as("/bin/shell", argv, pw.uid, pw.gid);
         if (pid < 0) {
             puts("login: could not start shell");
             continue;

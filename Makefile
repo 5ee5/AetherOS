@@ -110,7 +110,9 @@ USB_IMG  := $(BUILD_DIR)/usb.img
 
 LIBC_DIR  := user/libc
 LIBC_SRCS := $(LIBC_DIR)/src/syscall.c $(LIBC_DIR)/src/stdio.c \
-             $(LIBC_DIR)/src/string.c   $(LIBC_DIR)/src/stdlib.c
+             $(LIBC_DIR)/src/string.c   $(LIBC_DIR)/src/stdlib.c \
+             $(LIBC_DIR)/src/sha256.c   $(LIBC_DIR)/src/crypt.c \
+             $(LIBC_DIR)/src/pwdb.c
 LIBC_OBJS := $(LIBC_SRCS:$(LIBC_DIR)/src/%.c=$(BUILD_DIR)/libc/%.o)
 LIBC_CRT0 := $(BUILD_DIR)/libc/crt0.o
 LIBC_A    := $(BUILD_DIR)/libc.a
@@ -122,11 +124,17 @@ USER_CFLAGS := -std=c11 -ffreestanding -fno-builtin -fno-stack-protector \
 USER_BIN_NAMES := ls cat wc uname pwd mkdir rm cp mv wget grep touch head tail sort find login whoami id passwd useradd userdel sudo poweroff reboot sleep kill ps chmod chown stat free df
 USER_ELFS := $(USER_BIN_NAMES:%=$(BUILD_DIR)/bin/%.elf)
 
+# Host-side password hash generator.  Built with the HOST compiler from the same
+# KDF sources as the target so the hash seeded into /etc/shadow by the image
+# scripts is one the on-target crypt_verify() accepts.
+HOSTCC   ?= cc
+MKPASSWD := $(BUILD_DIR)/mkpasswd
+
 KERNEL_OBJS := $(KERNEL_C_SRCS:%.c=$(BUILD_DIR)/%.o) \
 	$(KERNEL_ASM_SRCS:%.asm=$(BUILD_DIR)/%.o)
 BOOT_OBJS := $(BOOT_C_SRCS:%.c=$(BUILD_DIR)/%.o)
 
-.PHONY: all clean esp iso disk usb flash check-deps run-qemu test boot-test userlibc
+.PHONY: all clean esp iso disk usb flash check-deps run-qemu test boot-test userlibc mkpasswd
 
 all: esp
 
@@ -202,6 +210,20 @@ $(BUILD_DIR)/bin/%.elf: $(BUILD_DIR)/bin/%.o $(LIBC_A) $(LIBC_CRT0)
 	$(LD) -m elf_x86_64 -Ttext=0x400000 -e _start --build-id=none \
 	    $(LIBC_CRT0) $< $(LIBC_A) -o $@
 
+# Host tool (not part of the OS image itself).  Its --selftest checks SHA-256
+# against the FIPS vectors and the KDF against its own round trip; run it as a
+# build step so a broken hash implementation fails the build rather than locking
+# root out of the image.
+$(MKPASSWD): tools/mkpasswd.c $(LIBC_DIR)/src/crypt.c $(LIBC_DIR)/src/sha256.c
+	@mkdir -p $(@D)
+	@# -iquote, not -I: the quoted includes ("crypt.h") must come from tinylibc
+	@# while the angled ones (<stdio.h>) must come from the HOST libc.  With -I
+	@# the tinylibc stdio.h shadows the host's and fprintf/stderr vanish.
+	$(HOSTCC) -std=c11 -O2 -Wall -Wextra -iquote $(LIBC_DIR)/include -o $@ $^
+	@$@ --selftest
+
+mkpasswd: $(MKPASSWD)
+
 $(KERNEL_BUILD)/kernel.elf: $(KERNEL_OBJS) kernel/linker.ld
 	@mkdir -p $(@D)
 	$(LD) $(KERNEL_LDFLAGS) -o $@ $(KERNEL_OBJS)
@@ -223,12 +245,12 @@ esp: $(BUILD_DIR)/BOOTX64.EFI $(KERNEL_BUILD)/kernel.elf
 # so they must be prerequisites too — otherwise editing the shell rebuilds
 # shell.elf but leaves the stale copy on the disk image, and the change is
 # silently not under test.
-$(DISK_IMG): $(USER_ELFS) $(SHELL_ELF) $(HELLO_ELF) scripts/make-disk.sh
+$(DISK_IMG): $(USER_ELFS) $(SHELL_ELF) $(HELLO_ELF) scripts/make-disk.sh $(MKPASSWD)
 	./scripts/make-disk.sh
 
 disk: $(DISK_IMG)
 
-$(USB_IMG): $(USER_ELFS) $(SHELL_ELF) $(HELLO_ELF) scripts/make-usb.sh esp
+$(USB_IMG): $(USER_ELFS) $(SHELL_ELF) $(HELLO_ELF) scripts/make-usb.sh esp $(MKPASSWD)
 	./scripts/make-usb.sh
 
 usb: $(USB_IMG)

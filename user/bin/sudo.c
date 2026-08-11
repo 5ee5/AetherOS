@@ -1,79 +1,123 @@
+#include <crypt.h>
+#include <pwdb.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-#define PASSWD_FILE "/etc/passwd"
-#define BUF_SZ 2048
+/* /bin/sudo is setuid root, so euid is 0 the moment it starts.  Every decision
+   below must therefore be made on the REAL uid — getuid(), never geteuid().
+ *
+ * Two independent gates, both of which must pass for a non-root caller:
+ *
+ *   1. Authorization — the caller's name appears in /etc/sudoers.  Missing or
+ *      unreadable sudoers means nobody but root may use sudo (fail closed).
+ *   2. Authentication — the caller retypes their own password, verified against
+ *      /etc/shadow.  A locked account (no usable hash) can never pass.
+ *
+ * Gate 1 did not exist before: sudo authenticated the caller and then handed out
+ * root to anyone who could type their own password — and skipped even that when
+ * the password field was empty, which is how useradd left every new account. */
 
-static char s_buf[BUF_SZ];
+#define SUDOERS_PATH "/etc/sudoers"
+#define SUDOERS_MAX  2048
 
-/* Look up stored password for a given uid. Returns 0 on success. */
-static int passwd_for_uid(uid_t uid, char *out_pass, char *out_name)
+static char s_sudoers[SUDOERS_MAX];
+
+/* Whitespace trim in place; returns the start of the trimmed string. */
+static char *trim(char *s)
 {
-    int fd = open(PASSWD_FILE, 0, 0);
-    if (fd < 0) return -1;
-    long n = read(fd, s_buf, BUF_SZ - 1); close(fd);
-    if (n <= 0) return -1;
-    s_buf[n] = '\0';
+    while (*s == ' ' || *s == '\t' || *s == '\r') s++;
+    long n = (long)strlen(s);
+    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\r'))
+        s[--n] = '\0';
+    return s;
+}
 
-    /* Format: name:password:uid:gid:home */
-    char *p = s_buf;
-    while (*p) {
-        char *name = p;
-        char *c1 = strchr(p, ':');    if (!c1) break; *c1 = '\0';
-        char *pass = c1 + 1;
-        char *c2 = strchr(pass, ':'); if (!c2) break; *c2 = '\0';
-        char *uid_s = c2 + 1;
-        char *c3 = strchr(uid_s, ':'); if (!c3) break; *c3 = '\0';
-        char *rest = c3 + 1;
-        char *nl = strchr(rest, '\n'); if (nl) *nl = '\0';
+/* One account name per line; '#' starts a comment.  Returns 1 if `name` is
+   listed. */
+static int sudoers_allows(const char *name)
+{
+    int fd = open(SUDOERS_PATH, O_RDONLY, 0);
+    if (fd < 0) return 0;
+    long n = read(fd, s_sudoers, SUDOERS_MAX - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    s_sudoers[n] = '\0';
 
-        if ((uid_t)atoi(uid_s) == uid) {
-            strncpy(out_pass, pass, 63); out_pass[63] = '\0';
-            if (out_name) { strncpy(out_name, name, 63); out_name[63] = '\0'; }
-            return 0;
-        }
-        p = nl ? nl + 1 : rest + strlen(rest);
+    char *cur = s_sudoers;
+    while (*cur) {
+        char *line = cur;
+        char *nl = strchr(cur, '\n');
+        if (nl) { *nl = '\0'; cur = nl + 1; } else { cur += strlen(cur); }
+
+        char *hash = strchr(line, '#');
+        if (hash) *hash = '\0';
+
+        line = trim(line);
+        if (line[0] == '\0') continue;
+        if (strcmp(line, name) == 0) return 1;
     }
-    return -1;
+    return 0;
 }
 
 int main(int argc, char **argv)
 {
-    if (argc < 2) { puts("usage: sudo <command> [args...]"); return 1; }
-
-    /* getuid() returns the real (calling) uid; geteuid() would return 0
-       because /bin/sudo has the setuid bit set. */
-    uid_t ruid = getuid();
-
-    static char stored_pass[64];
-    static char username[64];
-
-    if (passwd_for_uid(ruid, stored_pass, username) < 0) {
-        puts("sudo: user not found in /etc/passwd");
+    if (argc < 2) {
+        puts("usage: sudo <command> [args...]");
         return 1;
     }
 
-    /* Prompt for password unless the account has no password set. */
-    if (stored_pass[0] != '\0') {
-        printf("[sudo] password for %s: ", username);
-        static char entered[64];
+    uid_t ruid = getuid();
+
+    /* Resolve a bare command name against /bin, the way the shell does — sudo
+       used to pass argv[1] straight to spawn_as, so `sudo whoami` always failed
+       and only absolute paths worked. */
+    static char path[256];
+    if (strchr(argv[1], '/') != NULL) {
+        strncpy(path, argv[1], sizeof(path) - 1);
+        path[sizeof(path) - 1] = '\0';
+    } else {
+        snprintf(path, sizeof(path), "/bin/%s", argv[1]);
+    }
+
+    if (ruid != 0) {
+        pwent_t me;
+        if (pw_by_uid(ruid, &me) != 0) {
+            puts("sudo: your account is not in /etc/passwd");
+            return 1;
+        }
+
+        if (!sudoers_allows(me.name)) {
+            printf("sudo: %s is not in the sudoers file\n", me.name);
+            return 1;
+        }
+
+        static char stored[CRYPT_MAX];
+        if (sh_get(me.name, stored, sizeof(stored)) != 0 ||
+            crypt_is_locked(stored)) {
+            puts("sudo: your account has no usable password");
+            return 1;
+        }
+
+        printf("[sudo] password for %s: ", me.name);
+        static char entered[128];
         long n = read(0, entered, sizeof(entered) - 1);
         if (n < 0) n = 0;
         if (n > 0 && entered[n - 1] == '\n') n--;
         entered[n] = '\0';
 
-        if (strcmp(entered, stored_pass) != 0) {
+        int ok = crypt_verify(entered, stored);
+        memset(entered, 0, sizeof(entered));
+
+        if (!ok) {
             puts("sudo: authentication failure");
             return 1;
         }
     }
 
-    /* euid=0 (setuid binary), so spawn_as is allowed. */
-    pid_t pid = spawn_as(argv[1], &argv[1], 0, 0);
+    pid_t pid = spawn_as(path, &argv[1], 0, 0);
     if (pid < 0) {
-        printf("sudo: cannot execute %s\n", argv[1]);
+        printf("sudo: cannot execute %s\n", path);
         return 1;
     }
     waitpid(pid, NULL, 0);
