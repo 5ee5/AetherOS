@@ -237,6 +237,18 @@ static int64_t sys_open(uint64_t path_virt, uint64_t flags, uint64_t mode)
                 else               access = 4u;  /* O_RDONLY → read */
                 if (!cred_check(&cp->cred, fuid, fgid, fmode, access))
                     return -13; /* EACCES */
+
+                /* Strip setuid/setgid before handing out a writable descriptor.
+                   A root-owned setuid binary that is group- or world-writable
+                   could otherwise be rewritten by an unprivileged user and would
+                   keep its bits — turning "can write this file" into "can run
+                   code as its owner".  Doing it at open time rather than on the
+                   write itself means a descriptor obtained earlier cannot be used
+                   to sneak past the check. */
+                if ((rw == 1u || rw == 2u) && (fmode & 06000u) != 0 &&
+                    cp->cred.euid != 0) {
+                    vfs_chmod(path, (uint16_t)(fmode & (uint16_t)~06000u));
+                }
             }
             /* If stat fails the file doesn't exist; O_CREAT will handle it. */
         }
@@ -949,7 +961,14 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
         uint16_t fmode = 0; uint32_t fuid = 0, fgid = 0;
         if (vfs_file_stat(path, &fmode, &fuid, &fgid) < 0) return -2;
         if (p->cred.euid != 0 && p->cred.euid != fuid) return -1; /* EPERM */
-        return vfs_chmod(path, (uint16_t)(a1 & 0xfffU));
+        uint16_t newmode = (uint16_t)(a1 & 0xfffU);
+        /* An unprivileged chmod may not leave setgid on a file whose group the
+           caller is not a member of, or it would grant that group's identity to
+           whoever runs it.  (Setuid by the owner is allowed: it can only confer
+           the owner's own identity, which they already have.) */
+        if (p->cred.euid != 0 && p->cred.egid != fgid)
+            newmode &= (uint16_t)~02000u;
+        return vfs_chmod(path, newmode);
     }
     case SYS_SLEEP:   sched_sleep_ms(a0); return 0;
     case SYS_KILL: {

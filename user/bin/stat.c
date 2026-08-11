@@ -14,6 +14,12 @@ static void fmt_mode(uint16_t mode, char *out)
     out[7] = (mode & 0004u) ? 'r' : '-';
     out[8] = (mode & 0002u) ? 'w' : '-';
     out[9] = (mode & 0001u) ? 'x' : '-';
+    /* setuid/setgid/sticky replace the matching execute slot, as ls does: a
+       lowercase letter when execute is also set, uppercase when it is not.
+       Without this a setuid binary was indistinguishable from a plain one. */
+    if (mode & 04000u) out[3] = (mode & 0100u) ? 's' : 'S';
+    if (mode & 02000u) out[6] = (mode & 0010u) ? 's' : 'S';
+    if (mode & 01000u) out[9] = (mode & 0001u) ? 't' : 'T';
     out[10] = '\0';
 }
 
