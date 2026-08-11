@@ -76,4 +76,38 @@ void test_vmm_run(void)
 
 	KTEST_ASSERT(vmm_unmap(TEST_VIRT2));
 	pmm_free_page(page2);
+
+	/* --- NX reaches the hardware PTE --- */
+
+	/* VMM_NX is bit 63, well outside the flag range the rest of the mapping
+	   path handles, so it is exactly the kind of flag a mask could silently
+	   drop — leaving NX enabled in EFER but protecting nothing.  Read the PTE
+	   back rather than trusting the call. */
+	uint64_t page3 = pmm_alloc_page();
+	KTEST_ASSERT(page3 != PMM_ALLOC_FAILED);
+	if (page3 != PMM_ALLOC_FAILED) {
+		KTEST_ASSERT(vmm_map(TEST_VIRT2, page3, VMM_WRITABLE | VMM_NX));
+
+		uint64_t pte = 0;
+		KTEST_ASSERT(vmm_pte_peek(TEST_VIRT2, &pte));
+		KTEST_ASSERT((pte & VMM_NX) != 0);
+		/* ...and the mapping is otherwise intact. */
+		uint64_t nx_phys = 0;
+		KTEST_ASSERT(vmm_virt_to_phys(TEST_VIRT2, &nx_phys));
+		KTEST_ASSERT(nx_phys == page3);
+
+		/* A mapping without VMM_NX must stay executable. */
+		KTEST_ASSERT(vmm_map(TEST_VIRT2, page3, VMM_WRITABLE));
+		KTEST_ASSERT(vmm_pte_peek(TEST_VIRT2, &pte));
+		KTEST_ASSERT((pte & VMM_NX) == 0);
+
+		KTEST_ASSERT(vmm_unmap(TEST_VIRT2));
+		pmm_free_page(page3);
+	}
+
+	/* The direct map must be non-executable: it aliases all of physical
+	   memory, so an executable alias undermines SMEP and NX together. */
+	uint64_t dm_pte = 0;
+	KTEST_ASSERT(vmm_pde_peek(vmm_direct_map_base() + 0x100000ULL, &dm_pte));
+	KTEST_ASSERT((dm_pte & VMM_NX) != 0);
 }

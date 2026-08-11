@@ -57,8 +57,10 @@ void syscall_init(void)
     /* LSTAR = syscall entry RIP. */
     wrmsr(IA32_LSTAR, (uint64_t)(uintptr_t)syscall_entry);
 
-    /* FMASK: mask IF on SYSCALL entry (cleared; re-enabled on SYSRETQ). */
-    wrmsr(IA32_FMASK, 0x200ULL);
+    /* FMASK: clear IF and AC on SYSCALL entry.  Clearing AC matters for SMAP —
+       otherwise userland could set AC itself and enter the kernel with the
+       user-access barrier already disabled. */
+    wrmsr(IA32_FMASK, 0x200ULL | 0x40000ULL);
 
     serial_write("syscall: SYSCALL/SYSRET enabled\n");
 }
@@ -476,6 +478,9 @@ static int64_t spawn_process(uint64_t path_virt, uint64_t argv_virt,
     __asm__ volatile("cli" ::: "memory");
     uint64_t old_cr3 = vmm_pml4_phys();
     vmm_space_switch(result.cr3);
+    /* The writes below go straight to the child's user addresses rather than
+       through copy_to_user, so they need their own SMAP window. */
+    user_access_begin();
 
     uint64_t sp = result.user_sp;  /* 0x7ffffffffffff0 */
 
@@ -505,6 +510,7 @@ static int64_t spawn_process(uint64_t path_virt, uint64_t argv_virt,
     sp -= 8;
     *(uint64_t *)(uintptr_t)sp = (uint64_t)argc;
 
+    user_access_end();
     vmm_space_switch(old_cr3);
     __asm__ volatile("sti" ::: "memory");
 

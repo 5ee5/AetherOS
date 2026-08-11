@@ -4,6 +4,7 @@
 
 #include "acpi/acpi.h"
 #include "arch/x86_64/apic.h"
+#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/ioapic.h"
@@ -137,6 +138,10 @@ void kernel_main(const struct os_boot_info *boot_info)
 	x86_64_gdt_init();
 	serial_write("kernel: gdt installed\n");
 
+	/* NX/SMEP/SMAP, before anything can touch user memory. APs do the same in
+	   ap_entry — EFER and CR4 are per-CPU. */
+	cpu_enable_protections();
+
 	tss_init();
 	serial_write("kernel: tss installed\n");
 
@@ -150,6 +155,7 @@ void kernel_main(const struct os_boot_info *boot_info)
 
 	pmm_init(boot_info);
 	vmm_init(boot_info);
+	vmm_harden_direct_map();
 	if (!vmm_unmap((uint64_t)(uintptr_t)kernel_stack_guard)) {
 		panic("failed to install stack guard page");
 	}

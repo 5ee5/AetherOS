@@ -28,7 +28,9 @@ bool copy_from_user(void *dst, const void *user_src, uint64_t len)
         return false;
     }
     /* On fault during `rep movsb`, RCX holds the bytes not yet copied and the
-       handler redirects RIP to label 2; len (RCX) is then non-zero. */
+       handler redirects RIP to label 2; len (RCX) is then non-zero.  The fixup
+       lands inside the SMAP window, so AC is cleared on both paths below. */
+    user_access_begin();
     __asm__ volatile(
         "1: rep movsb\n"
         "2:\n"
@@ -38,6 +40,7 @@ bool copy_from_user(void *dst, const void *user_src, uint64_t len)
         : "+c"(len), "+S"(user_src), "+D"(dst)
         :
         : "memory");
+    user_access_end();
     return len == 0;
 }
 
@@ -46,6 +49,7 @@ bool copy_to_user(void *user_dst, const void *src, uint64_t len)
     if (!user_range_ok((uint64_t)(uintptr_t)user_dst, len)) {
         return false;
     }
+    user_access_begin();
     __asm__ volatile(
         "1: rep movsb\n"
         "2:\n"
@@ -55,6 +59,7 @@ bool copy_to_user(void *user_dst, const void *src, uint64_t len)
         : "+c"(len), "+S"(src), "+D"(user_dst)
         :
         : "memory");
+    user_access_end();
     return len == 0;
 }
 

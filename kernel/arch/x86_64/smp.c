@@ -155,6 +155,9 @@ uint32_t smp_init(const struct acpi_madt_info *madt)
 
 void ap_entry(void)
 {
+	/* Per-CPU registers: an AP that skipped this would run the same kernel
+	   with NX/SMEP/SMAP silently off. */
+	cpu_enable_protections();
 	lapic_ap_init();
 	sched_ap_enter();
 	/* Enter the idle loop — the timer ISR will context-switch away. */

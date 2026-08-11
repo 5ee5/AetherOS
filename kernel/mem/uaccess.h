@@ -4,6 +4,24 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "arch/x86_64/cpu.h"
+
+/* SMAP makes any kernel access to a user page fault unless EFLAGS.AC is set.
+   Bracket every deliberate user access with these; they compile to nothing at
+   runtime when the CPU lacks SMAP (stac/clac would #UD there).  A missed site
+   does not crash loudly — inside a copy routine the exception table catches the
+   fault and the syscall quietly returns -EFAULT — so add the window rather than
+   widening user_range_ok if a user access starts failing. */
+static inline void user_access_begin(void)
+{
+    if (cpu_smap_active) __asm__ volatile("stac" ::: "cc");
+}
+
+static inline void user_access_end(void)
+{
+    if (cpu_smap_active) __asm__ volatile("clac" ::: "cc");
+}
+
 /* First byte above the user-accessible virtual range. */
 #define USER_ADDR_LIMIT 0x800000000000ULL
 

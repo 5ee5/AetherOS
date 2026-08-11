@@ -47,10 +47,13 @@ trampoline32:
     or  eax, (1 << 5)
     mov cr4, eax
 
-    ; Enable EFER.LME (long mode enable)
+    ; Enable EFER.LME (long mode enable) and EFER.NXE.
+    ; NXE must be set BEFORE paging comes on: the shared page tables mark the
+    ; direct map non-executable, and while NXE is clear bit 63 is a reserved
+    ; bit that faults on any access through the entry, not just on fetch.
     mov ecx, 0xC0000080
     rdmsr
-    or  eax, (1 << 8)
+    or  eax, (1 << 8) | (1 << 11)
     wrmsr
 
     ; Enable paging (CR0.PG)

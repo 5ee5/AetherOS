@@ -13,6 +13,7 @@
 #define PAGE_LARGE    0x080ULL
 #define PAGE_MASK     0x000ffffffffff000ULL
 #define INDEX_MASK    0x1ffULL
+#define TWO_MIB       0x200000ULL
 
 static uint64_t active_pml4_phys;
 static uint64_t direct_map;
@@ -48,6 +49,64 @@ void vmm_init(const struct os_boot_info *boot_info)
 	if (active_pml4_phys != boot_info->page_table_root) {
 		panic("bootloader page-table handoff mismatch");
 	}
+}
+
+/* Mark the whole direct map non-executable.  It aliases every byte of physical
+   memory, so leaving it executable means any page the kernel can write — a DMA
+   buffer, the heap, a user page — is reachable as code by a stray jump, which
+   is most of what SMEP is trying to prevent.  The kernel executes from its own
+   higher-half mapping at 0xffffffff80000000 and only ever reads and writes
+   through the direct map.
+
+   The identity map at virtual 0 is deliberately left executable: the AP
+   trampoline runs there during the real-to-long-mode transition.
+
+   EFER.NXE must already be set on every CPU that can walk these tables — the
+   BSP does it in cpu_enable_protections before this runs, and the AP
+   trampoline sets it alongside LME before enabling paging. With NXE clear,
+   bit 63 is reserved and faults on any access through the entry. */
+void vmm_harden_direct_map(void)
+{
+	uint64_t *pml4 = phys_to_virt(active_pml4_phys);
+	uint64_t marked = 0;
+
+	for (uint64_t off = 0; off < direct_map_size; off += TWO_MIB) {
+		uint64_t virt  = direct_map + off;
+		uint64_t pml4i = (virt >> 39U) & INDEX_MASK;
+		uint64_t pdpti = (virt >> 30U) & INDEX_MASK;
+		uint64_t pdi   = (virt >> 21U) & INDEX_MASK;
+
+		uint64_t pml4e = pml4[pml4i];
+		if ((pml4e & PAGE_PRESENT) == 0) {
+			continue;
+		}
+		uint64_t *pdpt = phys_to_virt(pml4e & PAGE_MASK);
+		uint64_t pdpte = pdpt[pdpti];
+		if ((pdpte & PAGE_PRESENT) == 0) {
+			continue;
+		}
+		if ((pdpte & PAGE_LARGE) != 0) {          /* 1 GiB mapping */
+			if ((pdpte & VMM_NX) == 0) {
+				pdpt[pdpti] = pdpte | VMM_NX;
+				marked++;
+			}
+			continue;
+		}
+		uint64_t *pd = phys_to_virt(pdpte & PAGE_MASK);
+		uint64_t pde = pd[pdi];
+		if ((pde & PAGE_PRESENT) != 0 && (pde & VMM_NX) == 0) {
+			pd[pdi] = pde | VMM_NX;
+			marked++;
+		}
+	}
+
+	/* Reload CR3 to drop stale TLB entries for everything just changed. */
+	__asm__ volatile("mov %%cr3, %%rax\n\tmov %%rax, %%cr3"
+			 : : : "rax", "memory");
+
+	serial_write("vmm: direct map marked NX (");
+	serial_write_dec(marked);
+	serial_write(" entries)\n");
 }
 
 bool vmm_virt_to_phys(uint64_t virtual_address, uint64_t *physical_address)
@@ -162,6 +221,48 @@ static uint64_t *pte_for(uint64_t virt)
 
 	uint64_t *pt = phys_to_virt(pde & PAGE_MASK);
 	return &pt[pti];
+}
+
+/* Read back the raw leaf PTE for `virt`. Lets callers (and the tests) verify
+   what actually reached the hardware rather than trusting the mapping call. */
+bool vmm_pte_peek(uint64_t virt, uint64_t *out)
+{
+	uint64_t *pte = pte_for(virt);
+	if (pte == NULL || (*pte & PAGE_PRESENT) == 0) {
+		return false;
+	}
+	*out = *pte;
+	return true;
+}
+
+/* Read back the entry that actually maps `virt` at large-page granularity —
+   the PDPT entry if it is a 1 GiB page, otherwise the PD entry. Needed to
+   inspect the direct map, which is built from large pages and so has no PTE. */
+bool vmm_pde_peek(uint64_t virt, uint64_t *out)
+{
+	uint64_t pml4i = (virt >> 39U) & INDEX_MASK;
+	uint64_t pdpti = (virt >> 30U) & INDEX_MASK;
+	uint64_t pdi   = (virt >> 21U) & INDEX_MASK;
+
+	uint64_t *pml4 = phys_to_virt(active_pml4_phys);
+	if ((pml4[pml4i] & PAGE_PRESENT) == 0) {
+		return false;
+	}
+	uint64_t *pdpt = phys_to_virt(pml4[pml4i] & PAGE_MASK);
+	uint64_t pdpte = pdpt[pdpti];
+	if ((pdpte & PAGE_PRESENT) == 0) {
+		return false;
+	}
+	if ((pdpte & PAGE_LARGE) != 0) {
+		*out = pdpte;
+		return true;
+	}
+	uint64_t *pd = phys_to_virt(pdpte & PAGE_MASK);
+	if ((pd[pdi] & PAGE_PRESENT) == 0) {
+		return false;
+	}
+	*out = pd[pdi];
+	return true;
 }
 
 bool vmm_map(uint64_t virt, uint64_t phys, uint64_t flags)

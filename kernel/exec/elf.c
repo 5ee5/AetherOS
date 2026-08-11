@@ -84,6 +84,11 @@ bool elf_load(const void *image, uint64_t size, elf_load_result_t *out)
         if (ph->p_flags & PF_W) {
             flags |= VMM_WRITABLE;
         }
+        /* Honour the segment's execute bit instead of mapping everything RWX,
+           so a write into a data segment cannot be turned into code. */
+        if (!(ph->p_flags & PF_X)) {
+            flags |= VMM_NX;
+        }
 
         uint64_t vbase  = ph->p_vaddr & ~(PAGE_SIZE - 1ULL);
         uint64_t vend   = ph->p_vaddr + ph->p_memsz;
@@ -141,7 +146,8 @@ bool elf_load(const void *image, uint64_t size, elf_load_result_t *out)
         uint8_t *pv = (uint8_t *)(uintptr_t)(vmm_direct_map_base() + phys);
         memset(pv, 0, PAGE_SIZE);
         uint64_t virt = USER_STACK_BASE + p * PAGE_SIZE;
-        if (!vmm_space_map(cr3, virt, phys, VMM_USER | VMM_WRITABLE)) {
+        /* The stack is never executed: mark it non-executable. */
+        if (!vmm_space_map(cr3, virt, phys, VMM_USER | VMM_WRITABLE | VMM_NX)) {
             serial_write("elf: stack vmm_space_map failed\n");
             goto fail;
         }
