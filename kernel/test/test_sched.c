@@ -211,6 +211,22 @@ void test_sched_run(void)
 	__asm__ volatile("cli" ::: "memory");
 	KTEST_ASSERT(sleeper_resumed == 0U);
 
+	/* --- A voluntary yield is not a timer interrupt ---
+	   Both used to arrive on vector 0x20, so g_ticks counted yields as ticks (and
+	   every yield sent the LAPIC an end-of-interrupt for something it had never
+	   delivered).  Yields now come in on their own vector: a few thousand of them
+	   must barely move the tick count, where before each one added exactly 1. */
+	__asm__ volatile("sti" ::: "memory");
+	uint64_t ticks_before = sched_ticks();
+	for (uint32_t i = 0; i < 2000U; ++i) {
+		thread_yield();
+	}
+	uint64_t ticks_delta = sched_ticks() - ticks_before;
+	__asm__ volatile("cli" ::: "memory");
+	/* Real interrupts in that window are on the order of tens per CPU at ~1 kHz;
+	   the bound is loose, but it fails hard (delta >= 2000) if yields are counted. */
+	KTEST_ASSERT(ticks_delta < 500U);
+
 	/* --- Killing a lock holder is deferred, not immediate ---
 	   Stopping a thread dead while it holds a mutex left that mutex locked
 	   forever, and a victim killed inside the VFS wedged the filesystem for every

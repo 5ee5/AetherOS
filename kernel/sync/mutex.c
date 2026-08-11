@@ -19,10 +19,10 @@ void mutex_lock(mutex_t *m)
 		spinlock_release(&m->lock);
 
 		/* Disable interrupts so the timer cannot preempt between here
-		   and int $0x20, preventing a double-enqueue race where a
+		   and int $SCHED_YIELD_VECTOR, preventing a double-enqueue race where a
 		   concurrent wakeup sets state=READY before we sleep. */
 		__asm__ volatile("cli" ::: "memory");
-		__asm__ volatile("int $0x20" ::: "memory");
+		SCHED_YIELD();
 		/* iretq restored RFLAGS with IF=0 (we called cli before int).
 		   Re-enable interrupts now that we're awake. */
 		__asm__ volatile("sti" ::: "memory");

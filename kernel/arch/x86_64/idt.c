@@ -134,7 +134,7 @@ void x86_64_exception_dispatch(struct x86_64_interrupt_frame *frame)
 		if (t) {
 			__asm__ volatile("cli" ::: "memory");
 			t->state = THREAD_DEAD;
-			__asm__ volatile("int $0x20" ::: "memory");
+			SCHED_YIELD();
 		}
 		for (;;) __asm__ volatile("hlt");
 	}

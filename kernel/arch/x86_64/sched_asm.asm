@@ -3,6 +3,7 @@ bits 64
 section .text
 
 extern sched_tick
+extern sched_yield_tick
 extern thread_exit
 
 ; ---- APIC timer ISR (vector 0x20) ---------------------------------------
@@ -29,8 +30,14 @@ extern thread_exit
 ;   [rsp+144] RSP   (interrupted stack pointer)
 ;   [rsp+152] SS
 ;
-global apic_timer_isr
-apic_timer_isr:
+; Both scheduler entry points save the same 15 GP registers, hand RSP to a C
+; function that returns the RSP to resume on, and iretq into it.  They differ only
+; in which function: the APIC timer's handler advances the tick count and signals
+; end-of-interrupt, the voluntary-yield handler does neither — sending an EOI for a
+; software interrupt the LAPIC never delivered can retire a real pending one.
+%macro SCHED_ENTRY 2
+global %1
+%1:
     push rax
     push rbx
     push rcx
@@ -47,8 +54,8 @@ apic_timer_isr:
     push r14
     push r15
 
-    mov rdi, rsp        ; pass current RSP to sched_tick
-    call sched_tick     ; returns new RSP (may be a different thread)
+    mov rdi, rsp        ; pass current RSP to the handler
+    call %2             ; returns new RSP (may be a different thread)
     mov rsp, rax        ; switch to new stack
 
     pop r15
@@ -68,6 +75,10 @@ apic_timer_isr:
     pop rax
 
     iretq
+%endmacro
+
+SCHED_ENTRY apic_timer_isr,  sched_tick
+SCHED_ENTRY sched_yield_isr, sched_yield_tick
 
 ; ---- thread_run_trampoline -----------------------------------------------
 ;

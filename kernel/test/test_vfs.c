@@ -5,6 +5,7 @@
 
 #include "core/serial.h"
 #include "fs/vfs.h"
+#include "sched/sched.h"
 #include "mem/pmm.h"
 #include "mem/vmm.h"
 #include "sched/thread.h"
@@ -48,12 +49,12 @@ static void test_vfs_concurrency(void)
     }
 
     /* Yield rather than spin: with one CPU the workers only run once this
-       thread gives the scheduler a chance, and int $0x20 works with IF clear.
+       thread gives the scheduler a chance, and int $SCHED_YIELD_VECTOR works with IF clear.
        The bound is ~10x what the work needs, so a stuck waiter fails the
        assertion below instead of hanging the boot until the test times out. */
     int finished = 0;
     for (int spins = 0; spins < 100000 && finished < VFS_STRESS_THREADS; ++spins) {
-        __asm__ volatile("int $0x20" ::: "memory");
+        SCHED_YIELD();
         finished = 0;
         for (int i = 0; i < VFS_STRESS_THREADS; ++i) finished += s_stress_done[i];
     }

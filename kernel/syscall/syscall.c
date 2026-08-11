@@ -185,7 +185,7 @@ static int64_t sys_write(uint64_t fd, uint64_t buf_virt, uint64_t count)
                 if (n < 0) break;          /* reader gone */
                 w += (uint32_t)n;
                 if (w < chunk)
-                    __asm__ volatile("int $0x20" ::: "memory"); /* yield if full */
+                    SCHED_YIELD(); /* yield if full */
             }
             wrote = w;
             break;
@@ -291,11 +291,11 @@ static int64_t sys_read_stdin(void *buf, uint32_t count)
     struct process *self = sched_current_process();
     if (self) self->in_console_read = true;
     while (n < count) {
-        __asm__ volatile("sti" ::: "memory");   /* allow timer IRQ so int $0x20 yields */
+        __asm__ volatile("sti" ::: "memory");   /* allow timer IRQ so int $SCHED_YIELD_VECTOR yields */
         console_fill();
         char c = input_getchar();
         if (!c) {
-            __asm__ volatile("int $0x20" ::: "memory");  /* yield, stay READY */
+            SCHED_YIELD();  /* yield, stay READY */
             continue;
         }
         if (c == '\r') c = '\n';
@@ -341,7 +341,7 @@ static int64_t sys_read(uint64_t fd, uint64_t buf_virt, uint64_t count)
         int pidx = fd_id(fds, (int)fd);
         int n;
         while ((n = pipe_read(pidx, kbuf, chunk)) == -2)
-            __asm__ volatile("int $0x20" ::: "memory");
+            SCHED_YIELD();
         if (n < 0) return -1;
         if (n == 0) return 0;
         if (!copy_to_user((void *)(uintptr_t)buf_virt, kbuf, (uint64_t)n)) return -14;
@@ -352,7 +352,7 @@ static int64_t sys_read(uint64_t fd, uint64_t buf_virt, uint64_t count)
     if (type == FD_SOCKET) {
         int idx = fd_id(fds, (int)fd);
         int n;
-        /* Bounded wait.  This used to spin on int $0x20 forever, so a peer that
+        /* Bounded wait.  This used to spin on int $SCHED_YIELD_VECTOR forever, so a peer that
            connected and then said nothing hung the reader for good with no way
            out.  Sleeping rather than yielding also stops it burning a core. */
         uint64_t waited = 0;
@@ -441,7 +441,7 @@ static int64_t sys_exit(uint64_t status)
     /* Disable interrupts, mark dead, and force a reschedule. */
     __asm__ volatile("cli" ::: "memory");
     t->state = THREAD_DEAD;
-    __asm__ volatile("int $0x20" ::: "memory");
+    SCHED_YIELD();
     /* Never reached. */
     for (;;) {
         __asm__ volatile("hlt");

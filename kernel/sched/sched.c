@@ -19,6 +19,7 @@
 
 /* Declared in sched_asm.asm. */
 extern void apic_timer_isr(void);
+extern void sched_yield_isr(void);
 extern void sched_idle_loop(void);
 
 /* ---- Run queue --------------------------------------------------------- */
@@ -27,11 +28,9 @@ static spinlock_t rq_lock = SPINLOCK_INIT;
 static struct thread *rq_head;
 static struct thread *rq_tail;
 
-/* Scheduler entries, not milliseconds: this handler is entered by the hardware
-   timer on every CPU *and* by every software yield (int $0x20), so it advances
-   several times faster than wall time.  Sleep deadlines therefore use the TSC
-   (apic_now_tsc) rather than this counter, which is kept only as a coarse
-   activity count. */
+/* Timer interrupts taken, summed across CPUs — so still not a wall clock, since
+   every CPU contributes its own.  Voluntary yields no longer inflate it (they come
+   in on a separate vector), but sleep deadlines use the TSC regardless. */
 static volatile uint64_t g_ticks;
 static struct thread *sleep_head;  /* protected by rq_lock */
 
@@ -107,8 +106,10 @@ static uint32_t current_cpu_id(void)
 
 void sched_init(void)
 {
-	/* Install the APIC timer ISR at vector 0x20. */
+	/* Install the APIC timer ISR, and the voluntary-yield entry point on its own
+	   vector so a yield is not mistaken for a delivered interrupt. */
 	idt_install_gate(APIC_TIMER_VECTOR, apic_timer_isr, 0);
+	idt_install_gate(SCHED_YIELD_VECTOR, sched_yield_isr, 0);
 
 	/* Register the BSP as thread 0. */
 	struct thread *bsp = thread_create_current();
@@ -154,7 +155,7 @@ void sched_wake(struct thread *t)
 {
 	/* Wait until the thread has left its CPU before making it runnable.  A
 	   thread blocks by setting BLOCKED, dropping its lock, then yielding via
-	   int $0x20; a waker on another CPU can run in that window.  Enqueuing the
+	   int $SCHED_YIELD_VECTOR; a waker on another CPU can run in that window.  Enqueuing the
 	   thread before it has saved its context would let a third CPU resume it on
 	   its still-live stack.  sched_tick clears on_cpu once the context is saved;
 	   callers only wake already-blocked threads, so this spins briefly. */
@@ -223,7 +224,10 @@ bool sched_kill(struct thread *t)
 	return true;
 }
 
-uint64_t sched_tick(uint64_t old_rsp)
+/* Shared body of both scheduler entry points.  from_timer distinguishes a real
+   APIC timer interrupt from a voluntary `int $SCHED_YIELD_VECTOR`: only the former
+   advances the tick count and owes the LAPIC an end-of-interrupt. */
+static uint64_t schedule(uint64_t old_rsp, bool from_timer)
 {
 	uint32_t cpu = current_cpu_id();
 
@@ -272,16 +276,22 @@ uint64_t sched_tick(uint64_t old_rsp)
 	struct thread *cur = cpu_current[cpu];
 	cur->rsp = old_rsp;
 
-	lapic_eoi();
+	/* Only a real interrupt is acknowledged.  Doing this for a software
+	   `int` would retire whatever the LAPIC actually had in service. */
+	if (from_timer) {
+		lapic_eoi();
+	}
 
 	/* Plain acquire: we are on the ISR path, so IF is already clear and the
 	   irqsave variant would only add a redundant pushfq/popfq to the hottest
 	   path in the kernel.  Every thread-context taker uses the irqsave form. */
 	spinlock_acquire(&rq_lock);
 
-	/* Advance the activity counter and wake any sleeper whose deadline has passed
-	   on the real clock. */
-	g_ticks++;
+	/* Count only real timer interrupts, and wake any sleeper whose deadline has
+	   passed on the real clock (a voluntary yield is as good a moment as any). */
+	if (from_timer) {
+		g_ticks++;
+	}
 	uint64_t now_tsc = apic_now_tsc();
 	struct thread **sp = &sleep_head;
 	while (*sp) {
@@ -354,6 +364,21 @@ uint64_t sched_tick(uint64_t old_rsp)
 	return next->rsp;
 }
 
+uint64_t sched_ticks(void)
+{
+	return g_ticks;
+}
+
+uint64_t sched_tick(uint64_t old_rsp)
+{
+	return schedule(old_rsp, true);
+}
+
+uint64_t sched_yield_tick(uint64_t old_rsp)
+{
+	return schedule(old_rsp, false);
+}
+
 void sched_sleep_ms(uint64_t ms)
 {
 	struct thread *t = sched_current();
@@ -368,10 +393,10 @@ void sched_sleep_ms(uint64_t ms)
 	t->sleep_next     = sleep_head;
 	sleep_head        = t;
 	/* Drop the lock but stay in the irqsave window: the timer must not preempt
-	   between marking BLOCKED and yielding, and int $0x20 fires with IF clear.
+	   between marking BLOCKED and yielding, and int $SCHED_YIELD_VECTOR fires with IF clear.
 	   The ISR's iretq restores IF=0, so restore the caller's flags after. */
 	spinlock_release(&rq_lock);
-	__asm__ volatile("int $0x20" ::: "memory");
+	SCHED_YIELD();
 	__asm__ volatile("push %0; popfq" :: "r"(f) : "memory", "cc");
 }
 

@@ -194,7 +194,7 @@ void thread_exit(void)
 {
 	__asm__ volatile("cli" ::: "memory");
 	sched_current()->state = THREAD_DEAD;
-	__asm__ volatile("int $0x20" ::: "memory");
+	SCHED_YIELD();
 	/* Never reached. */
 	for (;;) {
 		__asm__ volatile("hlt");
@@ -203,5 +203,5 @@ void thread_exit(void)
 
 void thread_yield(void)
 {
-	__asm__ volatile("int $0x20" ::: "memory");
+	SCHED_YIELD();
 }

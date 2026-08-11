@@ -26,10 +26,26 @@ void sched_wake(struct thread *t);
    tear down anything the thread is still using. */
 bool sched_kill(struct thread *t);
 
+/* Vector for a voluntary reschedule, distinct from the APIC timer's 0x20 (and the
+   PS/2 keyboard's 0x21).  The handler behind it neither advances the tick count nor
+   signals end-of-interrupt, because nothing was actually delivered.  Yield through
+   SCHED_YIELD() rather than writing the vector out by hand; the literal in the asm
+   below must match this value. */
+#define SCHED_YIELD_VECTOR 0x22
+#define SCHED_YIELD() __asm__ volatile("int $0x22" ::: "memory")
+
+/* Timer interrupts taken since boot, summed across CPUs.  Not a clock — use
+   apic_now_tsc() for elapsed time.  Exposed so a test can check that voluntary
+   yields do not inflate it. */
+uint64_t sched_ticks(void);
+
 /* Called from the timer ISR (assembly).
    old_rsp: RSP after saving all GP registers onto the current stack.
    Returns the RSP to restore (may be a different thread's stack). */
 uint64_t sched_tick(uint64_t old_rsp);
+
+/* Called from the voluntary-yield stub (assembly), same contract as sched_tick. */
+uint64_t sched_yield_tick(uint64_t old_rsp);
 
 /* Called by BSP (from smp_init) to allocate the idle thread for an AP
    before the AP is started. Must be called with interrupts disabled. */
