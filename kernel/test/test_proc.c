@@ -8,10 +8,14 @@
 #include "exec/elf.h"
 #include "fs/vfs.h"
 #include "mem/heap.h"
+#include "mem/pmm.h"
 #include "mem/vmm.h"
 #include "proc/fd.h"
 #include "proc/process.h"
 #include "sched/thread.h"
+
+/* Must match MAX_PROCS in proc/process.c, which does not export it. */
+#define MAX_PROCS_TEST 64
 
 extern const uint8_t hello_elf_start[];
 extern const uint8_t hello_elf_end[];
@@ -99,5 +103,55 @@ void test_proc_run(void)
         KTEST_ASSERT(fd_type(&holder.fds, 1) == FD_NONE);
         KTEST_ASSERT(fd_type(&holder.fds, 2) == FD_NONE);
         KTEST_ASSERT(fd_type(&holder.fds, sfd) == FD_SOCKET);
+    }
+
+    /* A process must never exist unpublished.  With the table full,
+       process_create_from_result used to skip the insert but return the process
+       anyway, so it ran while invisible to ps, unwaitable and never reaped.  Fill
+       every slot, then check the next creation is refused outright — and that it
+       does not leak the address space it was handed. */
+    {
+        struct process *filler[MAX_PROCS_TEST];
+        int made = 0;
+        for (; made < MAX_PROCS_TEST; ++made) {
+            elf_load_result_t fr;
+            if (!elf_load(hello_elf_start, size, &fr)) break;
+            struct process *fp = process_create_from_result(&fr);
+            if (fp == NULL) { vmm_space_destroy(fr.cr3); break; }
+            filler[made] = fp;
+        }
+        /* The table is full now (or we ran out of heap first, which is also a
+           refusal rather than a silent success — either way nothing started
+           unpublished). */
+        /* Refuse repeatedly.  The first attempt may grow the kernel heap (which
+           never returns pages to the PMM), so measure from the second: once the
+           high-water mark is reached, any further drop in free pages means a
+           refused attempt leaked the address space it was handed. */
+        uint64_t after_first = 0;
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            elf_load_result_t xr;
+            if (!elf_load(hello_elf_start, size, &xr)) break;
+            struct process *extra = process_create_from_result(&xr);
+            KTEST_ASSERT(extra == NULL);
+            if (extra != NULL) {
+                /* Would-be regression: clean up so later suites still run. */
+                process_mark_exited(extra, 0);
+                process_reap(extra);
+                break;
+            }
+            if (attempt == 0) {
+                after_first = pmm_free_pages();
+            } else {
+                KTEST_ASSERT(pmm_free_pages() == after_first);
+            }
+        }
+        for (int i = 0; i < made; ++i) {
+            struct thread *ft = filler[i]->thread;
+            vmm_space_destroy(filler[i]->cr3);
+            process_mark_exited(filler[i], 0);
+            process_reap(filler[i]);
+            kfree(ft->kstack);
+            kfree(ft);
+        }
     }
 }

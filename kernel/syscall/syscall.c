@@ -112,6 +112,13 @@ void syscall_init(void)
 /* How often a blocked waitpid wakes to look for Ctrl+C on the console. */
 #define CTRLC_POLL_MS 50U
 
+/* Ceiling on a single kernel bounce buffer sized by a user-supplied length.
+   sys_listdir and sys_ps used to kmalloc whatever the caller asked for, so any
+   unprivileged process could exhaust the kernel heap in one call.  Requests are
+   clamped rather than refused: both syscalls report how much they wrote, so a
+   caller that asks for more simply gets this much. */
+#define SYS_BUF_MAX (64U * 1024U)
+
 static fd_table_t *current_fds(void);
 
 /* Write sink resolution. */
@@ -554,7 +561,10 @@ static int64_t spawn_process(uint64_t path_virt, uint64_t argv_virt,
 
     result.user_sp = sp;
     struct process *proc = process_create_from_result(&result);
-    if (!proc) return -1;  /* address space leaks here only on OOM; acceptable */
+    /* Out of memory, or the process table is full.  The new address space is
+       freed by process_create_from_result on every failure path, so a spawn loop
+       that keeps failing no longer leaks one per attempt. */
+    if (!proc) return -11;  /* EAGAIN */
 
     /* Store process name from the basename of path. */
     {
@@ -714,6 +724,7 @@ static int64_t sys_listdir(uint64_t path_virt, uint64_t buf_virt,
         return -14;
     if (!user_range_ok(buf_virt, bufsz)) return -14;
     if (bufsz == 0) return 0;
+    if (bufsz > SYS_BUF_MAX) bufsz = SYS_BUF_MAX;
     char *kbuf = (char *)kmalloc((uint32_t)bufsz);
     if (!kbuf) return -12;
     uint32_t n = vfs_listdir(path, kbuf, (uint32_t)bufsz, (uint32_t)flags);
@@ -943,6 +954,7 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_PS: {
         if (!user_range_ok(a0, a1)) return -14;
         if (a1 == 0) return 0;
+        if (a1 > SYS_BUF_MAX) a1 = SYS_BUF_MAX;
         char *kbuf = (char *)kmalloc((uint32_t)a1);
         if (!kbuf) return -12;
         /* Copy only the bytes process_ps actually wrote (incl. NUL); copying

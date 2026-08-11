@@ -8,6 +8,7 @@
 #include "fs/vfs.h"
 #include "lib/string.h"
 #include "mem/heap.h"
+#include "mem/vmm.h"
 #include "net/socket.h"
 #include "proc/fd.h"
 #include "proc/pipe.h"
@@ -196,6 +197,7 @@ struct process *process_create_from_result(const elf_load_result_t *r)
     struct process *proc = (struct process *)kmalloc(sizeof(struct process));
     if (proc == NULL) {
         serial_write("process: kmalloc failed\n");
+        vmm_space_destroy(r->cr3);
         return NULL;
     }
 
@@ -215,15 +217,35 @@ struct process *process_create_from_result(const elf_load_result_t *r)
     fd_table_init(&proc->fds);
     cred_init(&proc->cred, 0, 0);
     proc->thread = thread_create_user(r->entry, r->user_sp, r->cr3);
+    if (proc->thread == NULL) {
+        serial_write("process: no memory for a thread\n");
+        vmm_space_destroy(r->cr3);
+        kfree(proc);
+        return NULL;
+    }
     proc->thread->process = proc;
 
-    /* Assign the pid and publish into the table atomically. */
+    /* Assign the pid and publish into the table atomically.  Publishing must
+       succeed: a process that was started without a table slot was invisible to
+       ps, could never be waited on, and was never reaped — so refuse to create
+       it at all rather than leaving a running orphan behind. */
+    bool published = false;
     uint64_t f = spinlock_acquire_irqsave(&proc_table_lock);
     proc->pid = alloc_pid_locked();
     for (int i = 0; i < MAX_PROCS; ++i) {
-        if (!s_procs[i]) { s_procs[i] = proc; break; }
+        if (!s_procs[i]) { s_procs[i] = proc; published = true; break; }
     }
     spinlock_release_irqrestore(&proc_table_lock, f);
+
+    if (!published) {
+        serial_write("process: table full\n");
+        /* The thread was never made runnable, so nothing else can reach it. */
+        vmm_space_destroy(r->cr3);
+        kfree(proc->thread->kstack);
+        kfree(proc->thread);
+        kfree(proc);
+        return NULL;
+    }
 
     serial_write("process: created pid=");
     serial_write_dec(proc->pid);
@@ -304,6 +326,11 @@ uint32_t process_ps(char *buf, uint32_t bufsz)
     for (uint32_t i = 0; hdr[i] && off + 1 < bufsz; i++)
         buf[off++] = hdr[i];
 
+    /* Hold the table lock across the walk: without it this read a struct that
+       another CPU was freeing in process_reap.  Formatting into a kernel buffer
+       takes no further locks and is bounded by MAX_PROCS, so the critical
+       section stays short. */
+    uint64_t f = spinlock_acquire_irqsave(&proc_table_lock);
     for (int i = 0; i < MAX_PROCS; ++i) {
         struct process *p = s_procs[i];
         if (!p || p->exited) continue;
@@ -320,6 +347,7 @@ uint32_t process_ps(char *buf, uint32_t bufsz)
             buf[off++] = nm[k];
         buf[off++] = '\n';
     }
+    spinlock_release_irqrestore(&proc_table_lock, f);
     /* NUL-terminate and return the number of valid bytes (including the
        terminator).  The caller must copy only this many bytes to userspace so
        it never exposes the uninitialized remainder of the heap buffer. */

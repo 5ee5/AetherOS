@@ -46,9 +46,13 @@ static uint32_t next_tid;
 
 static struct thread *alloc_thread(void)
 {
+	/* Returns NULL rather than panicking: a user process can drive this from a
+	   spawn loop, and halting the machine on a failed allocation turned an
+	   unprivileged out-of-memory condition into a denial of service.  Every
+	   caller propagates the NULL up to the syscall, which fails with -ENOMEM. */
 	struct thread *t = (struct thread *)kmalloc(sizeof(struct thread));
 	if (t == NULL) {
-		panic("thread: kmalloc failed");
+		return NULL;
 	}
 	t->rsp        = 0;
 	t->kstack     = NULL;
@@ -76,11 +80,15 @@ static struct thread *alloc_thread(void)
 struct thread *thread_create(thread_fn_t fn, void *arg)
 {
 	struct thread *t = alloc_thread();
+	if (t == NULL) {
+		return NULL;
+	}
 
 	t->kstack_size = THREAD_KSTACK_SIZE;
 	t->kstack      = kmalloc(THREAD_KSTACK_SIZE);
 	if (t->kstack == NULL) {
-		panic("thread: stack kmalloc failed");
+		kfree(t);
+		return NULL;
 	}
 	t->kstack_top = (uint64_t)(uintptr_t)t->kstack + THREAD_KSTACK_SIZE;
 
@@ -109,7 +117,12 @@ struct thread *thread_create(thread_fn_t fn, void *arg)
 
 struct thread *thread_create_current(void)
 {
+	/* Boot-time only (registering the running CPU as a thread), and there is no
+	   way to continue without it. */
 	struct thread *t = alloc_thread();
+	if (t == NULL) {
+		panic("thread: current-thread kmalloc failed");
+	}
 	t->state = THREAD_RUNNING;
 	/* rsp will be filled in by the first sched_tick invocation. */
 	return t;
@@ -117,7 +130,12 @@ struct thread *thread_create_current(void)
 
 struct thread *thread_create_idle(void)
 {
+	/* Boot-time only, and the scheduler cannot run without an idle thread, so
+	   failing here really is unrecoverable — unlike the user-driven paths. */
 	struct thread *t = alloc_thread();
+	if (t == NULL) {
+		panic("thread: idle thread kmalloc failed");
+	}
 	t->kstack_size = THREAD_KSTACK_SIZE;
 	t->kstack      = kmalloc(THREAD_KSTACK_SIZE);
 	if (t->kstack == NULL) {
@@ -133,11 +151,15 @@ struct thread *thread_create_idle(void)
 struct thread *thread_create_user(uint64_t entry_rip, uint64_t user_rsp, uint64_t cr3)
 {
 	struct thread *t = alloc_thread();
+	if (t == NULL) {
+		return NULL;
+	}
 
 	t->kstack_size = THREAD_KSTACK_SIZE;
 	t->kstack      = kmalloc(THREAD_KSTACK_SIZE);
 	if (t->kstack == NULL) {
-		panic("thread: user kstack kmalloc failed");
+		kfree(t);
+		return NULL;
 	}
 	t->kstack_top = (uint64_t)(uintptr_t)t->kstack + THREAD_KSTACK_SIZE;
 	t->is_user    = true;

@@ -46,7 +46,10 @@ bool net_init(void)
     }
 
     /* Start the network polling thread. */
-    thread_create(net_thread_fn, NULL);
+    if (thread_create(net_thread_fn, NULL) == NULL) {
+        serial_write("net: no memory for the poll thread; networking disabled\n");
+        return false;
+    }
 
     serial_write("net: online\n");
     return true;

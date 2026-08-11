@@ -229,7 +229,9 @@ void kernel_main(const struct os_boot_info *boot_info)
 	}
 
 	/* Start the GUI desktop thread. */
-	thread_create(kernel_gui_thread, NULL);
+	if (thread_create(kernel_gui_thread, NULL) == NULL) {
+		serial_write("kernel: no memory for the GUI thread; desktop disabled\n");
+	}
 
 	serial_write("kernel: initialization complete\n");
 

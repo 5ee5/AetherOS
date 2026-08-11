@@ -102,7 +102,10 @@ bool usb_hid_init(void)
     xhci_control(s_dev, 0x21, 0x0B, 0x0000, 0, 0, 0);   /* SET_PROTOCOL boot */
     xhci_control(s_dev, 0x21, 0x0A, 0x0000, 0, 0, 0);   /* SET_IDLE infinite */
 
-    thread_create(hid_poll_thread, NULL);
+    if (thread_create(hid_poll_thread, NULL) == NULL) {
+        serial_write("usb_hid: no memory for the poll thread; keyboard disabled\n");
+        return false;
+    }
     serial_write("usb-hid: keyboard ready\n");
     return true;
 }
