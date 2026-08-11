@@ -90,7 +90,11 @@ int main(int argc, char **argv)
             req_len += l;
         }
     }
-    write(fd, req, (size_t)req_len);
+    if (write_all(fd, req, (size_t)req_len) != req_len) {
+        puts("wget: could not send request");
+        close(fd);
+        return 1;
+    }
 
     /* Read response, skip headers, print body. */
     char buf[512];

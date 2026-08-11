@@ -11,7 +11,7 @@ static size_t s_opos;
 static void flush(void)
 {
     if (s_opos) {
-        write(1, s_obuf, s_opos);
+        write_all(1, s_obuf, s_opos);
         s_opos = 0;
     }
 }
@@ -176,15 +176,15 @@ int snprintf(char *buf, size_t n, const char *fmt, ...)
 int puts(const char *s)
 {
     size_t n = strlen(s);
-    write(1, s, n);
-    write(1, "\n", 1);
+    write_all(1, s, n);
+    write_all(1, "\n", 1);
     return (int)n + 1;
 }
 
 int putchar(int c)
 {
     char b = (char)c;
-    write(1, &b, 1);
+    write_all(1, &b, 1);
     return c;
 }
 

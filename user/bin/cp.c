@@ -14,10 +14,18 @@ int main(int argc, char **argv)
 
     char buf[512];
     long n;
-    while ((n = read(src, buf, sizeof(buf))) > 0)
-        write(dst, buf, (size_t)n);
+    int  rc = 0;
+    while ((n = read(src, buf, sizeof(buf))) > 0) {
+        /* A short write means the disk is full.  Silently ignoring it produced a
+           truncated copy that looked like a successful one. */
+        if (write_all(dst, buf, (size_t)n) != n) {
+            puts("cp: write failed (disk full?)");
+            rc = 1;
+            break;
+        }
+    }
 
     close(src);
     close(dst);
-    return 0;
+    return rc;
 }

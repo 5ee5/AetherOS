@@ -226,3 +226,15 @@ int diskinfo(uint64_t *total, uint64_t *free)
     if (r == 0) { *total = buf[0]; *free = buf[1]; }
     return r;
 }
+
+ssize_t write_all(int fd, const void *buf, size_t n)
+{
+    const char *p = (const char *)buf;
+    size_t done = 0;
+    while (done < n) {
+        ssize_t w = write(fd, p + done, n - done);
+        if (w <= 0) break;      /* full or broken: nothing further will land */
+        done += (size_t)w;
+    }
+    return (ssize_t)done;
+}

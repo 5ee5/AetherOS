@@ -5,6 +5,10 @@
 
 ssize_t  read(int fd, void *buf, size_t n);
 ssize_t  write(int fd, const void *buf, size_t n);
+/* Write all n bytes, looping over short writes; returns bytes written (< n only
+   if the sink is full or broken).  The kernel reports a short write when a disk
+   or socket buffer fills, so a bare write() call can silently drop data. */
+ssize_t  write_all(int fd, const void *buf, size_t n);
 int      open(const char *path, int flags, int mode);
 int      close(int fd);
 void     _exit(int status);

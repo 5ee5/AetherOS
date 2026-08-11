@@ -166,37 +166,47 @@ static int64_t sys_write(uint64_t fd, uint64_t buf_virt, uint64_t count)
         if (!copy_from_user(kbuf, (const char *)(uintptr_t)buf_virt + done, chunk))
             return done ? (int64_t)done : -14;
 
+        uint64_t wrote = 0;
         switch (sink) {
         case SINK_SERIAL:
             for (uint64_t i = 0; i < chunk; ++i) serial_write_char(kbuf[i]);
+            wrote = chunk;
             break;
         case SINK_PIPE: {
             uint32_t w = 0;
             while (w < chunk) {
                 int n = pipe_write(idx, kbuf + w, (uint32_t)(chunk - w));
-                if (n < 0) return (done + w) ? (int64_t)(done + w) : 0;
+                if (n < 0) break;          /* reader gone */
                 w += (uint32_t)n;
                 if (w < chunk)
                     __asm__ volatile("int $0x20" ::: "memory"); /* yield if full */
             }
+            wrote = w;
             break;
         }
         case SINK_SOCKET: {
             int n = sock_send(idx, kbuf, (uint32_t)chunk);
             if (n < 0) return done ? (int64_t)done : -1;
+            wrote = (uint64_t)n;
             break;
         }
         case SINK_FILE: {
             int64_t n = vfs_write(vfd, kbuf, (uint32_t)chunk);
             if (n < 0) return done ? (int64_t)done : n;
+            wrote = (uint64_t)n;
             break;
         }
         default:
             return -9;
         }
-        done += chunk;
+        done += wrote;
+        /* A sink that took less than it was offered is full — a disk with no free
+           blocks, or a socket buffer that would not take the rest.  Report the
+           short count.  Returning `count` regardless, as this used to, told the
+           caller its data was safely written when some of it had been dropped. */
+        if (wrote < chunk) break;
     }
-    return (int64_t)count;
+    return (int64_t)done;
 }
 
 static fd_table_t *current_fds(void)

@@ -264,8 +264,11 @@ static void builtin_echo(char *args)
         int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (fd < 0) { puts_raw(err_redir); return; }
         int n = (int)strlen(args);
-        if (n > 0) write(fd, args, (size_t)n);
-        write(fd, "\n", 1);
+        if (n > 0 && write_all(fd, args, (size_t)n) != n) {
+            puts_raw(err_redir);
+        } else {
+            write_all(fd, "\n", 1);
+        }
         close(fd);
     } else {
         puts_raw(args);
