@@ -7,6 +7,62 @@
 #include "fs/vfs.h"
 #include "mem/pmm.h"
 #include "mem/vmm.h"
+#include "sched/thread.h"
+
+/* ---- Concurrent VFS access ------------------------------------------------ */
+
+#define VFS_STRESS_THREADS 3
+#define VFS_STRESS_ROUNDS  10
+
+/* Per-thread slots rather than shared counters: a plain ++ from several CPUs
+   loses updates, and the test would then fail for its own reasons. */
+static volatile int s_stress_done[VFS_STRESS_THREADS];
+static volatile int s_stress_errs[VFS_STRESS_THREADS];
+
+static void vfs_stress_thread(void *arg)
+{
+    int idx = (int)(uintptr_t)arg;
+    for (int i = 0; i < VFS_STRESS_ROUNDS; ++i) {
+        int fd = vfs_open("/hello.txt");
+        if (fd < 0) { s_stress_errs[idx]++; break; }
+        char buf[32];
+        int64_t n = vfs_read(fd, buf, sizeof(buf));
+        if (n <= 0) s_stress_errs[idx]++;
+        vfs_close(fd);
+    }
+    s_stress_done[idx] = 1;
+}
+
+/* The VFS lock is a mutex, so a contending thread blocks and is woken rather
+   than spinning.  That path is untouched by the rest of the suite, which is
+   single-threaded -- and a lost wakeup there would hang the whole system rather
+   than fail an assertion, so drive it deliberately. */
+static void test_vfs_concurrency(void)
+{
+    for (int i = 0; i < VFS_STRESS_THREADS; ++i) {
+        s_stress_done[i] = 0;
+        s_stress_errs[i] = 0;
+    }
+    for (int i = 0; i < VFS_STRESS_THREADS; ++i) {
+        thread_create(vfs_stress_thread, (void *)(uintptr_t)i);
+    }
+
+    /* Yield rather than spin: with one CPU the workers only run once this
+       thread gives the scheduler a chance, and int $0x20 works with IF clear.
+       The bound is ~10x what the work needs, so a stuck waiter fails the
+       assertion below instead of hanging the boot until the test times out. */
+    int finished = 0;
+    for (int spins = 0; spins < 100000 && finished < VFS_STRESS_THREADS; ++spins) {
+        __asm__ volatile("int $0x20" ::: "memory");
+        finished = 0;
+        for (int i = 0; i < VFS_STRESS_THREADS; ++i) finished += s_stress_done[i];
+    }
+
+    KTEST_ASSERT(finished == VFS_STRESS_THREADS);
+    int errs = 0;
+    for (int i = 0; i < VFS_STRESS_THREADS; ++i) errs += s_stress_errs[i];
+    KTEST_ASSERT(errs == 0);
+}
 
 void test_vfs_run(void)
 {
@@ -87,4 +143,6 @@ void test_vfs_run(void)
     KTEST_ASSERT(vfs_file_size("/a/../hello.txt")  == sz);  /* ".." collapse */
     KTEST_ASSERT(vfs_file_size("//hello.txt")      == sz);  /* double slash  */
     KTEST_ASSERT(vfs_file_size("/../hello.txt")    == sz);  /* ".." at root  */
+
+    test_vfs_concurrency();
 }

@@ -15,22 +15,32 @@
 #include "proc/process.h"
 #include "sched/sched.h"
 #include "security/cred.h"
-#include "sync/spinlock.h"
+#include "sync/mutex.h"
 
 /* One global FS lock. ext2 shares a single `scratch` buffer and s_files[] is a
    global table, so all VFS entry points must serialize — user threads can run
    concurrently on multiple CPUs. The cleanup-attribute guard releases on every
-   return path. No VFS function calls another, so the non-recursive lock is safe. */
-static spinlock_t vfs_lock = SPINLOCK_INIT;
+   return path. No VFS function calls another, so the non-recursive lock is safe.
+
+   A mutex, not a spinlock: every operation here polls a block device for
+   milliseconds (ext2_read/ext2_write reach AHCI, NVMe or USB), and a spinlock
+   made every other CPU burn that entire time in a pause loop. Worse, the holder
+   is preemptible, so a spinner could be waiting on a thread that is not even
+   running. Blocking hands the CPU to something useful instead.
+
+   Safe to block here: no VFS entry point is reached from an interrupt handler,
+   and no caller holds a spinlock or has interrupts disabled across a VFS call
+   (process_close_all_fds runs before sys_exit disables them). */
+static mutex_t vfs_lock = MUTEX_INIT;
 
 static inline void vfs_unlock_cleanup(int *held)
 {
     (void)held;
-    spinlock_release(&vfs_lock);
+    mutex_unlock(&vfs_lock);
 }
 
 #define VFS_LOCK()                                                      \
-    spinlock_acquire(&vfs_lock);                                        \
+    mutex_lock(&vfs_lock);                                              \
     int __vfs_guard __attribute__((cleanup(vfs_unlock_cleanup))) = 1;   \
     (void)__vfs_guard
 
