@@ -165,6 +165,15 @@ uint64_t vmm_pml4_phys(void)
 	return active_pml4_phys;
 }
 
+/* The address space actually installed right now, which is only the kernel's
+   while a kernel thread runs.  vmm_pml4_phys() is a boot-time snapshot: anyone
+   who switches CR3 temporarily and means to put back what was there must save
+   this, or a user thread resumes on the kernel PML4. */
+uint64_t vmm_current_cr3(void)
+{
+	return read_cr3() & PAGE_MASK;
+}
+
 static void invlpg(uint64_t virt)
 {
 	__asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");

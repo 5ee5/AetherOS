@@ -110,4 +110,33 @@ void test_vmm_run(void)
 	uint64_t dm_pte = 0;
 	KTEST_ASSERT(vmm_pde_peek(vmm_direct_map_base() + 0x100000ULL, &dm_pte));
 	KTEST_ASSERT((dm_pte & VMM_NX) != 0);
+
+	/* --- vmm_current_cr3 reports the installed space, vmm_pml4_phys does not ---
+
+	   These two were confused in sys_spawn: it saved vmm_pml4_phys() as the
+	   address space to go back to, which is the kernel's boot-time PML4 rather
+	   than the caller's, so a user thread was put on the kernel page tables and
+	   faulted at its next instruction fetch in ring 3 (audit H23).  Assert the
+	   distinction so a future caller cannot re-use the wrong one unnoticed. */
+	KTEST_ASSERT(vmm_current_cr3() == vmm_pml4_phys());   /* on a kernel thread */
+
+	uint64_t space = vmm_space_create();
+	KTEST_ASSERT(space != 0);
+	if (space != 0) {
+		KTEST_ASSERT(space != vmm_pml4_phys());
+		/* No preemption inside the window: sched_tick reinstalls the outgoing
+		   thread's own CR3, which would repair the switch before we look. */
+		__asm__ volatile("cli" ::: "memory");
+		vmm_space_switch(space);
+		uint64_t seen_live  = vmm_current_cr3();
+		uint64_t seen_stale = vmm_pml4_phys();
+		vmm_space_switch(seen_stale);
+		__asm__ volatile("sti" ::: "memory");
+
+		KTEST_ASSERT(seen_live == space);          /* tracks the real CR3 */
+		KTEST_ASSERT(seen_stale != space);         /* the snapshot does not */
+		KTEST_ASSERT(vmm_current_cr3() == vmm_pml4_phys());  /* restored */
+
+		vmm_space_destroy(space);
+	}
 }

@@ -571,7 +571,15 @@ static int64_t spawn_process(uint64_t path_virt, uint64_t argv_virt,
        thread's saved cr3, so a timer preemption here would resume the parent on
        the parent's CR3 and our writes would land in the wrong address space. */
     __asm__ volatile("cli" ::: "memory");
-    uint64_t old_cr3 = vmm_pml4_phys();
+    /* Save the address space that is actually installed, not vmm_pml4_phys():
+       that returns the kernel's boot-time PML4, so restoring it below put the
+       *calling user thread* on the kernel page tables.  The kernel half matches,
+       so the rest of the syscall ran fine — but if no timer tick intervened
+       before sysret (sched_tick reinstalls next->cr3 and silently repaired it),
+       the caller returned to ring 3 with the bootloader's supervisor identity
+       map in the user half, and the first instruction fetch faulted with
+       error=0x15 at rip.  That was H23. */
+    uint64_t old_cr3 = vmm_current_cr3();
     vmm_space_switch(result.cr3);
     /* The writes below go straight to the child's user addresses rather than
        through copy_to_user, so they need their own SMAP window. */

@@ -26,6 +26,7 @@ bool vmm_pde_peek(uint64_t virt, uint64_t *out);
 bool vmm_virt_to_phys(uint64_t virtual_address, uint64_t *physical_address);
 uint64_t vmm_direct_map_base(void);
 uint64_t vmm_pml4_phys(void);
+uint64_t vmm_current_cr3(void);
 bool vmm_map(uint64_t virt, uint64_t phys, uint64_t flags);
 bool vmm_unmap(uint64_t virt);
 bool vmm_protect(uint64_t virt, uint64_t flags);
