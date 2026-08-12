@@ -297,6 +297,25 @@ static uint64_t schedule(uint64_t old_rsp, bool from_timer)
 	while (*sp) {
 		struct thread *st = *sp;
 		if (st->sleep_deadline <= now_tsc) {
+			/* A thread whose deadline has already passed may still be running on
+			   another CPU.  sched_sleep_ms marks itself BLOCKED and links itself
+			   here while it is still executing, and only then yields; a sleep of
+			   0 ms — which sys_sleep passes straight through from userspace — is
+			   already expired inside that window.  Requeueing it there would
+			   dispatch a thread that has not yet saved its context, putting two
+			   CPUs on one kernel stack.  Leave it linked and collect it on a
+			   later tick, once it has switched off.  sched_wake guards the same
+			   hazard by spinning on on_cpu before it enqueues.
+
+			   `st != cur` matters: when the sleeper is the thread that just
+			   yielded into this very scheduler, its context is already saved
+			   (cur->rsp was written at the top of schedule()), so requeueing it
+			   is safe and it simply continues.  Holding that case back would
+			   cost every zero-length sleep a full tick of latency. */
+			if (st->on_cpu && st != cur && st->state == THREAD_BLOCKED) {
+				sp = &st->sleep_next;
+				continue;
+			}
 			*sp = st->sleep_next;
 			st->sleep_next = NULL;
 			/* Unlink unconditionally, but only a still-BLOCKED thread goes
