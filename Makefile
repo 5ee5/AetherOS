@@ -129,12 +129,13 @@ USER_ELFS := $(USER_BIN_NAMES:%=$(BUILD_DIR)/bin/%.elf)
 # scripts is one the on-target crypt_verify() accepts.
 HOSTCC   ?= cc
 MKPASSWD := $(BUILD_DIR)/mkpasswd
+STDIO_SELFTEST := $(BUILD_DIR)/stdio-selftest
 
 KERNEL_OBJS := $(KERNEL_C_SRCS:%.c=$(BUILD_DIR)/%.o) \
 	$(KERNEL_ASM_SRCS:%.asm=$(BUILD_DIR)/%.o)
 BOOT_OBJS := $(BOOT_C_SRCS:%.c=$(BUILD_DIR)/%.o)
 
-.PHONY: all clean esp iso disk usb flash check-deps run-qemu test boot-test userlibc mkpasswd
+.PHONY: all clean esp iso disk usb flash check-deps run-qemu test boot-test userlibc mkpasswd stdio-selftest
 
 all: esp
 
@@ -224,6 +225,22 @@ $(MKPASSWD): tools/mkpasswd.c $(LIBC_DIR)/src/crypt.c $(LIBC_DIR)/src/sha256.c
 
 mkpasswd: $(MKPASSWD)
 
+# tinylibc's snprintf has to honour the C99 return contract: callers detect
+# truncation from the return value, and returning the truncated length instead
+# silently disarmed every overflow guard in pwdb.c (see docs/audit-2026-08-12.md,
+# N1).  Checked against the real stdio.c at build time, like mkpasswd above, so a
+# regression fails the build rather than quietly truncating /etc/shadow.
+$(STDIO_SELFTEST): tools/stdio-selftest.c $(LIBC_DIR)/src/stdio.c $(LIBC_DIR)/src/string.c
+	@mkdir -p $(@D)
+	@# -I (not -iquote): stdio.c includes <unistd.h>, so tinylibc must be on the
+	@# angled path too, and we *want* its stdio.h to shadow the host's.
+	@# -fno-builtin stops gcc substituting __builtin_snprintf and checking this
+	@# against the host contract — the whole point is to test tinylibc's own.
+	$(HOSTCC) -std=c11 -O2 -Wall -Wextra -fno-builtin -I $(LIBC_DIR)/include -o $@ $^
+	@$@
+
+stdio-selftest: $(STDIO_SELFTEST)
+
 $(KERNEL_BUILD)/kernel.elf: $(KERNEL_OBJS) kernel/linker.ld
 	@mkdir -p $(@D)
 	$(LD) $(KERNEL_LDFLAGS) -o $@ $(KERNEL_OBJS)
@@ -245,12 +262,12 @@ esp: $(BUILD_DIR)/BOOTX64.EFI $(KERNEL_BUILD)/kernel.elf
 # so they must be prerequisites too — otherwise editing the shell rebuilds
 # shell.elf but leaves the stale copy on the disk image, and the change is
 # silently not under test.
-$(DISK_IMG): $(USER_ELFS) $(SHELL_ELF) $(HELLO_ELF) scripts/make-disk.sh $(MKPASSWD)
+$(DISK_IMG): $(USER_ELFS) $(SHELL_ELF) $(HELLO_ELF) scripts/make-disk.sh $(MKPASSWD) $(STDIO_SELFTEST)
 	./scripts/make-disk.sh
 
 disk: $(DISK_IMG)
 
-$(USB_IMG): $(USER_ELFS) $(SHELL_ELF) $(HELLO_ELF) scripts/make-usb.sh esp $(MKPASSWD)
+$(USB_IMG): $(USER_ELFS) $(SHELL_ELF) $(HELLO_ELF) scripts/make-usb.sh esp $(MKPASSWD) $(STDIO_SELFTEST)
 	./scripts/make-usb.sh
 
 usb: $(USB_IMG)

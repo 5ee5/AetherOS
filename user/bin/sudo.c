@@ -42,6 +42,13 @@ static int sudoers_allows(const char *name)
     long n = read(fd, s_sudoers, SUDOERS_MAX - 1);
     close(fd);
     if (n <= 0) return 0;
+    /* A file that fills the buffer would be parsed only as far as the cut, so an
+       account listed past it is denied with no explanation.  Refusing outright is
+       the same safe direction, but say so rather than failing silently. */
+    if (n >= SUDOERS_MAX - 1) {
+        puts("sudo: /etc/sudoers is too large to parse");
+        return 0;
+    }
     s_sudoers[n] = '\0';
 
     char *cur = s_sudoers;

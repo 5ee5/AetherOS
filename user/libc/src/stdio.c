@@ -22,27 +22,8 @@ static void emit(char c)
     if (s_opos == OBUF_SZ) flush();
 }
 
-static void emit_str(const char *s)
-{
-    if (!s) s = "(null)";
-    while (*s) emit(*s++);
-}
 
-static void emit_uint(unsigned long v, unsigned base, int upper)
-{
-    const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
-    char buf[20];
-    int  i = 0;
-    if (v == 0) { emit('0'); return; }
-    while (v) { buf[i++] = digits[v % base]; v /= base; }
-    while (i--) emit(buf[i]);
-}
 
-static void emit_long(long v)
-{
-    if (v < 0) { emit('-'); emit_uint((unsigned long)-v, 10, 0); }
-    else emit_uint((unsigned long)v, 10, 0);
-}
 
 /* Generic formatter: writes to either stdout buffer or a bounded string buffer. */
 typedef struct {
@@ -53,11 +34,19 @@ typedef struct {
 
 static void ctx_putc(fmt_ctx_t *ctx, char c)
 {
+    /* Count every byte, but write only the ones that fit.  snprintf has to
+       report the length it *would* have produced (C99) — that return value is how
+       callers detect truncation.  Advancing pos only on a successful write capped
+       the result at cap-1, which made every `if (out + len >= size)` overflow
+       check in pwdb.c unreachable by construction: passwd and useradd silently
+       wrote a truncated /etc/shadow and reported success.  Counting here also
+       gives printf a real return value instead of a constant 0. */
     if (ctx->buf) {
-        if (ctx->pos + 1 < ctx->cap) ctx->buf[ctx->pos++] = c;
+        if (ctx->pos + 1 < ctx->cap) ctx->buf[ctx->pos] = c;
     } else {
         emit(c);
     }
+    ctx->pos++;
 }
 
 static void ctx_puts(fmt_ctx_t *ctx, const char *s)
@@ -84,10 +73,6 @@ static void ctx_uint_w(fmt_ctx_t *ctx, unsigned long v, unsigned base, int upper
     ctx_uint_pad(ctx, v, base, upper, width, ' ');
 }
 
-static void ctx_uint(fmt_ctx_t *ctx, unsigned long v, unsigned base, int upper)
-{
-    ctx_uint_w(ctx, v, base, upper, 0);
-}
 
 static void ctx_long_pad(fmt_ctx_t *ctx, long v, int width, char padc)
 {
@@ -100,10 +85,6 @@ static void ctx_long_w(fmt_ctx_t *ctx, long v, int width)
     ctx_long_pad(ctx, v, width, ' ');
 }
 
-static void ctx_long(fmt_ctx_t *ctx, long v)
-{
-    ctx_long_w(ctx, v, 0);
-}
 
 static int vfmt(fmt_ctx_t *ctx, const char *fmt, va_list ap)
 {
@@ -136,7 +117,13 @@ static int vfmt(fmt_ctx_t *ctx, const char *fmt, va_list ap)
         default:  ctx_putc(ctx, '%'); ctx_putc(ctx, *p);                           break;
         }
     }
-    if (ctx->buf && ctx->pos < ctx->cap) ctx->buf[ctx->pos] = '\0';
+    /* Always terminate, clamping to the last byte of the buffer: pos can now run
+       past cap when the output was truncated, and `pos < cap` alone would then
+       leave the buffer unterminated.  cap == 0 means "write nothing at all". */
+    if (ctx->buf && ctx->cap > 0) {
+        size_t end = (ctx->pos < ctx->cap) ? ctx->pos : ctx->cap - 1;
+        ctx->buf[end] = '\0';
+    }
     return (int)ctx->pos;
 }
 

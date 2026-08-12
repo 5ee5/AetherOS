@@ -127,11 +127,21 @@ void syscall_init(void)
 
 static fd_table_t *current_fds(void);
 
+/* A descriptor arrives as a 64-bit register and every fd helper takes an int, so
+   narrowing it without a range check silently aliased: read(0x100000003, ...)
+   truncated to 3 and operated on that descriptor instead of reporting EBADF.
+   Reject anything that cannot name a slot before it is narrowed. */
+static bool fd_in_range(uint64_t fd)
+{
+    return fd < (uint64_t)MAX_FDS;
+}
+
 /* Write sink resolution. */
 enum write_sink { SINK_BAD, SINK_SERIAL, SINK_PIPE, SINK_SOCKET, SINK_FILE };
 
 static int64_t sys_write(uint64_t fd, uint64_t buf_virt, uint64_t count)
 {
+    if (!fd_in_range(fd)) return -9;                 /* -EBADF */
     if (!user_range_ok(buf_virt, count)) return -14; /* -EFAULT */
 
     fd_table_t *fds = current_fds();
@@ -313,6 +323,7 @@ static int64_t sys_read_stdin(void *buf, uint32_t count)
 
 static int64_t sys_read(uint64_t fd, uint64_t buf_virt, uint64_t count)
 {
+    if (!fd_in_range(fd)) return -9;   /* -EBADF */
     if (!user_range_ok(buf_virt, count)) return -14;
     if (count == 0) return 0;
 
@@ -385,6 +396,7 @@ static int64_t sys_read(uint64_t fd, uint64_t buf_virt, uint64_t count)
 
 static int64_t sys_close(uint64_t fd)
 {
+    if (!fd_in_range(fd)) return -9;   /* -EBADF */
     fd_table_t *fds = current_fds();
     if (!fds) return -9;
 
@@ -877,6 +889,7 @@ static int64_t sys_socket(uint64_t domain, uint64_t type, uint64_t proto)
 
 static int64_t sys_connect(uint64_t fd, uint64_t addr_virt, uint64_t addrlen)
 {
+    if (!fd_in_range(fd)) return -9;   /* -EBADF */
     (void)addrlen;
     if (addr_virt >= 0x800000000000ULL) return -14;
     fd_table_t *fds = current_fds();
@@ -892,6 +905,7 @@ static int64_t sys_connect(uint64_t fd, uint64_t addr_virt, uint64_t addrlen)
 
 static int64_t sys_send(uint64_t fd, uint64_t buf_virt, uint64_t len, uint64_t flags)
 {
+    if (!fd_in_range(fd)) return -9;   /* -EBADF */
     (void)flags;
     if (!user_range_ok(buf_virt, len)) return -14;
     fd_table_t *fds = current_fds();
@@ -916,6 +930,7 @@ static int64_t sys_send(uint64_t fd, uint64_t buf_virt, uint64_t len, uint64_t f
 
 static int64_t sys_recv(uint64_t fd, uint64_t buf_virt, uint64_t len, uint64_t flags)
 {
+    if (!fd_in_range(fd)) return -9;   /* -EBADF */
     (void)flags;
     if (!user_range_ok(buf_virt, len)) return -14;
     if (len == 0) return 0;
@@ -1074,8 +1089,12 @@ int64_t syscall_dispatch(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
        held forever — wedging the filesystem for every process — and releasing the
        lock on its behalf would be worse, publishing whatever half-finished state
        the operation was in.  Letting the syscall run to completion means every
-       lock is released and the data structures are consistent; the process is
-       already marked exited, so nothing here touches it. */
+       lock is released and the data structures are consistent.
+
+       Note the process is *not* already marked exited: process_kill returns before
+       process_mark_exited precisely when sched_kill defers, so that nothing can
+       free the struct while this thread is still running with a pointer to it.
+       That is why the teardown below has to be complete. */
     struct thread *t = sched_current();
     if (t && t->kill_pending) {
         /* process_kill left the process untouched so that nothing could free it
