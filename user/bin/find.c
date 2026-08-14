@@ -1,41 +1,62 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
-#define BUF 4096
+#define MAX_DEPTH  8
+#define LIST_BUF   1024
+#define PATH_MAX   512
 
 static char s_pattern[256];
 static int  s_has_pattern;
-static char s_path[512];
 
-static void do_find(const char *dir)
+/* One listing buffer and one path buffer per recursion level.  The previous
+   version declared both `static` *inside* the recursive function and wrote the
+   assembled path into a single file-scope buffer, so descending into a
+   subdirectory overwrote the parent's listing and path mid-iteration.  The user
+   stack is only 16 KiB, so these stay out of it. */
+static char s_lists[MAX_DEPTH][LIST_BUF];
+static char s_paths[MAX_DEPTH][PATH_MAX];
+
+static void do_find(const char *dir, int depth)
 {
-    static char buf[BUF];
-    long n = listdir(dir, buf, sizeof(buf));
+    if (depth >= MAX_DEPTH) return;
+
+    char *buf = s_lists[depth];
+    long n = listdir(dir, buf, LIST_BUF);
     if (n <= 0) return;
 
-    const char *p = buf;
-    while (p < buf + n) {
-        int len = (int)strlen(p);
-        if (len == 0) { p++; continue; }
+    char *path = s_paths[depth];
+    int   dlen = (int)strlen(dir);
+    /* Avoid emitting "//foo" when listing the root. */
+    int   sep  = (dlen > 0 && dir[dlen - 1] == '/') ? 0 : 1;
 
-        /* Build full path */
-        int dlen = (int)strlen(dir);
-        if (dlen + 1 + len + 1 > (int)sizeof(s_path)) { p += len + 1; continue; }
-        memcpy(s_path, dir, (long)dlen);
-        s_path[dlen] = '/';
-        memcpy(s_path + dlen + 1, p, (long)(len + 1));
+    char *p   = buf;
+    char *end = buf + n;
+    while (p < end) {
+        /* listdir returns NEWLINE-separated names (see ext2_list_dir).  This
+           used to walk them with strlen()/+1 as if they were NUL-separated, so
+           the very first "name" spanned the whole buffer and find printed one
+           bogus path and stopped. */
+        char *nl = p;
+        while (nl < end && *nl != '\n') nl++;
+        int len = (int)(nl - p);
+        if (len == 0) { p = nl + 1; continue; }
 
-        /* Print if matches pattern (or no pattern) */
-        if (!s_has_pattern || strstr(p, s_pattern))
-            puts(s_path);
+        if (dlen + sep + len + 1 > PATH_MAX) { p = nl + 1; continue; }
+        memcpy(path, dir, (size_t)dlen);
+        if (sep) path[dlen] = '/';
+        memcpy(path + dlen + sep, p, (size_t)len);
+        path[dlen + sep + len] = '\0';
 
-        /* Try to recurse (listdir on path returns >0 if it's a directory) */
-        static char sub[BUF];
-        long subn = listdir(s_path, sub, sizeof(sub));
-        if (subn > 0) do_find(s_path);
+        if (!s_has_pattern || strstr(path + dlen + sep, s_pattern))
+            puts(path);
 
-        p += len + 1;
+        struct stat st;
+        if (stat(path, &st) == 0 && S_ISDIR(st.st_mode))
+            do_find(path, depth + 1);
+
+        p = nl + 1;
     }
 }
 
@@ -47,9 +68,10 @@ int main(int argc, char **argv)
     if (argc >= 2) dir = argv[1];
     if (argc >= 3) {
         strncpy(s_pattern, argv[2], sizeof(s_pattern) - 1);
+        s_pattern[sizeof(s_pattern) - 1] = '\0';
         s_has_pattern = 1;
     }
 
-    do_find(dir);
+    do_find(dir, 0);
     return 0;
 }

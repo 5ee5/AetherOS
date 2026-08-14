@@ -145,5 +145,54 @@ void test_vfs_run(void)
     KTEST_ASSERT(vfs_file_size("//hello.txt")      == sz);  /* double slash  */
     KTEST_ASSERT(vfs_file_size("/../hello.txt")    == sz);  /* ".." at root  */
 
+    /* ---- Overlong paths must be refused, not overflow a kernel stack buffer --
+       path_split() copies the parent prefix into a 256-byte stack buffer, but
+       paths arrive here up to 511 bytes and the kernel is built
+       -fno-stack-protector.  A ~400-character parent used to smash the stack of
+       whichever thread called mkdir/creat/unlink/rename.  Each of these must
+       fail cleanly and leave the system standing -- reaching the assertions
+       below at all is most of the test. */
+    static char longpath[480];
+    longpath[0] = '/';
+    for (uint32_t i = 1; i < sizeof(longpath) - 3; ++i) longpath[i] = 'a';
+    longpath[sizeof(longpath) - 3] = '/';
+    longpath[sizeof(longpath) - 2] = 'x';
+    longpath[sizeof(longpath) - 1] = '\0';
+
+    KTEST_ASSERT(vfs_mkdir(longpath)  != 0);
+    KTEST_ASSERT(vfs_creat(longpath)  != 0);
+    KTEST_ASSERT(vfs_unlink(longpath) != 0);
+    KTEST_ASSERT(vfs_rename(longpath, "/ktest_nope.txt") != 0);
+    KTEST_ASSERT(vfs_rename("/hello.txt", longpath)      != 0);
+    /* The real file must be untouched by all of that. */
+    KTEST_ASSERT(vfs_file_size("/hello.txt") == sz);
+
+    /* ---- rmdir, and unlink's refusal to eat a directory --------------------
+       ext2_unlink had no directory check: it took the link count 2 -> 1, left
+       "." and ".." in place, never decremented the parent, and leaked every
+       block the directory owned. */
+    KTEST_ASSERT(vfs_mkdir("/ktest_dir") == 0);
+
+    /* A directory is not unlinkable. */
+    KTEST_ASSERT(vfs_unlink("/ktest_dir") != 0);
+    /* ...and it is still there afterwards. */
+    KTEST_ASSERT(vfs_mkdir("/ktest_dir") != 0);   /* already exists */
+
+    /* A non-empty directory cannot be rmdir'd. */
+    KTEST_ASSERT(vfs_creat("/ktest_dir/f.txt") == 0);
+    KTEST_ASSERT(vfs_rmdir("/ktest_dir") != 0);
+
+    /* Empty it, and rmdir succeeds. */
+    KTEST_ASSERT(vfs_unlink("/ktest_dir/f.txt") == 0);
+    KTEST_ASSERT(vfs_rmdir("/ktest_dir") == 0);
+    /* Gone: it can be created again. */
+    KTEST_ASSERT(vfs_mkdir("/ktest_dir") == 0);
+    KTEST_ASSERT(vfs_rmdir("/ktest_dir") == 0);
+
+    /* rmdir must refuse a regular file and the root directory. */
+    KTEST_ASSERT(vfs_rmdir("/hello.txt") != 0);
+    KTEST_ASSERT(vfs_rmdir("/") != 0);
+    KTEST_ASSERT(vfs_file_size("/hello.txt") == sz);
+
     test_vfs_concurrency();
 }

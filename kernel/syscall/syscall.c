@@ -83,6 +83,7 @@ void syscall_init(void)
 #define SYS_CHDIR    80U
 #define SYS_MKDIR    83U
 #define SYS_UNLINK   87U
+#define SYS_RMDIR    84U
 #define SYS_SOCKET   41U
 #define SYS_CONNECT  42U
 #define SYS_SEND     44U
@@ -550,8 +551,13 @@ static int64_t spawn_process(uint64_t path_virt, uint64_t argv_virt,
     if (!buf) return -12;
     int vfd = vfs_open(path);
     if (vfd < 0) { kfree(buf); return -2; }
-    vfs_read(vfd, buf, (uint32_t)fsize);
+    int64_t nread = vfs_read(vfd, buf, (uint32_t)fsize);
     vfs_close(vfd);
+    /* A short read (I/O error, or the file shrank between the size query and the
+       read) used to leave the tail of this buffer as uninitialized kernel heap,
+       which elf_load then parsed and copied into the new process's pages -- a
+       kernel-heap infoleak to userspace, and nondeterministic execution. */
+    if (nread < 0 || (uint64_t)nread != fsize) { kfree(buf); return -5; }
 
     elf_load_result_t result;
     if (!elf_load(buf, fsize, &result)) { kfree(buf); return -1; }
@@ -853,6 +859,14 @@ static int64_t sys_unlink(uint64_t path_virt)
     return vfs_unlink(path);
 }
 
+static int64_t sys_rmdir(uint64_t path_virt)
+{
+    char path[512];
+    if (strncpy_from_user(path, (const void *)(uintptr_t)path_virt, sizeof(path)) < 0)
+        return -14;
+    return vfs_rmdir(path);
+}
+
 static int64_t sys_chdir(uint64_t path_virt)
 {
     char path[512];
@@ -996,6 +1010,7 @@ static int64_t syscall_do(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_CREAT:   return sys_creat(a0);
     case SYS_MKDIR:   return sys_mkdir(a0);
     case SYS_UNLINK:  return sys_unlink(a0);
+    case SYS_RMDIR:   return sys_rmdir(a0);
     case SYS_RENAME: {
         char oldp[512], newp[512];
         if (strncpy_from_user(oldp, (const void *)(uintptr_t)a0, sizeof(oldp)) < 0 ||

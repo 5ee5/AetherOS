@@ -41,6 +41,10 @@ int vfs_mkdir(const char *path);
 /* Remove the file at `path`.  Returns 0 on success or -1 on error. */
 int vfs_unlink(const char *path);
 
+/* Remove an empty directory.  0 on success, -1 on failure (missing, not a
+   directory, not empty, or no write permission on the parent). */
+int vfs_rmdir(const char *path);
+
 /* Change working directory for the current process. */
 int vfs_chdir(const char *path);
 

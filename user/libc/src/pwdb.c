@@ -34,7 +34,11 @@ static int db_store(const char *path, const char *data, long len)
 {
     int fd = open(path, O_WRONLY | O_TRUNC | O_CREAT, 0);
     if (fd < 0) return -1;
-    long w = write(fd, data, (size_t)len);
+    /* write_all, not write: sys_write returns the bytes that actually landed, so
+       a short write on a nearly-full disk left the account database already
+       O_TRUNC'd and only half rewritten.  This is the last writer that still
+       used a bare write() after the short-write audit fix. */
+    long w = write_all(fd, data, (size_t)len);
     close(fd);
     return (w == len) ? 0 : -1;
 }

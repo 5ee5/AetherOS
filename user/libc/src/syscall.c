@@ -85,6 +85,8 @@ pid_t waitpid(pid_t pid, int *status, int options)
 
 uid_t getuid(void)  { return (uid_t)__sc1(102, 0); }
 gid_t getgid(void)  { return (gid_t)__sc1(104, 0); }
+uid_t geteuid(void) { return (uid_t)__sc1(107, 0); }
+gid_t getegid(void) { return (gid_t)__sc1(108, 0); }
 int   setuid(uid_t uid) { return (int)__sc1(105, (long)uid); }
 int   setgid(gid_t gid) { return (int)__sc1(106, (long)gid); }
 int   seteuid(uid_t uid) { return (int)__sc1(502, (long)uid); }
@@ -143,6 +145,11 @@ int mkdir(const char *path, int mode)
 int unlink(const char *path)
 {
     return (int)__sc1(87, (long)path);
+}
+
+int rmdir(const char *path)
+{
+    return (int)__sc1(84, (long)path);
 }
 
 int rename(const char *old_path, const char *new_path)

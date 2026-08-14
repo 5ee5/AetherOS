@@ -284,6 +284,30 @@ void process_kill(struct process *proc)
 {
     if (!proc || proc->exited) return;
 
+    /* Killing ourselves -- a user fault (idt.c) or kill(getpid()) -- must tear the
+       process down BEFORE the thread is marked dead, exactly as sys_exit does.
+       sched_kill sets THREAD_DEAD on the *running* thread and returns true, and
+       from that instant the next timer tick hands it to the reaper and never
+       resumes it.  Everything after the call would then be abandoned mid-flight:
+       process_close_all_fds takes vfs_lock and does block I/O, so a segfault timed
+       inside it left the filesystem mutex held forever, wedging every other
+       process on the machine.  Do the teardown while still runnable, then die. */
+    if (proc->thread && proc->thread == sched_current()) {
+        struct thread *self = proc->thread;
+        process_close_all_fds(proc);
+        process_orphan_children(proc);
+        proc->thread = NULL;
+        process_mark_exited(proc, 130);   /* 128 + SIGINT */
+        process_reap_if_orphaned(proc);
+
+        /* The address space is freed by the scheduler reaper once we are off our
+           own CR3; destroying it here would unmap the page tables still in CR3. */
+        __asm__ volatile("cli" ::: "memory");
+        self->state = THREAD_DEAD;
+        SCHED_YIELD();
+        for (;;) __asm__ volatile("hlt");   /* not reached */
+    }
+
     /* If the victim is inside the kernel holding a lock, sched_kill only flags it
        and it dies at its next syscall return.  Leave the process completely alone
        in that case: publishing the exit status here would let the parent's waitpid

@@ -25,6 +25,8 @@ int      pipe(int pipefd[2]);
 
 uid_t    getuid(void);
 gid_t    getgid(void);
+uid_t    geteuid(void);
+gid_t    getegid(void);
 int      setuid(uid_t uid);
 int      setgid(gid_t gid);
 int      seteuid(uid_t uid);
@@ -35,6 +37,7 @@ int      chmod(const char *path, int mode);
 int      creat(const char *path);
 int      mkdir(const char *path, int mode);
 int      unlink(const char *path);
+int      rmdir(const char *path);
 int      rename(const char *old_path, const char *new_path);
 int      chdir(const char *path);
 char    *getcwd(char *buf, long size);

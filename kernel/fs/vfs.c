@@ -516,6 +516,16 @@ int vfs_unlink(const char *path)
     return ext2_unlink(s_root_fs, path) ? 0 : -1;
 }
 
+int vfs_rmdir(const char *path)
+{
+    VFS_LOCK();
+    if (!s_root_fs) return -1;
+    char abuf[512];
+    path = vfs_resolve(path, abuf, sizeof(abuf));
+    if (!may_mutate_at(path)) return -1;
+    return ext2_rmdir(s_root_fs, path) ? 0 : -1;
+}
+
 /* ---- Working directory ---------------------------------------------------- */
 
 int vfs_chdir(const char *path)

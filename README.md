@@ -12,13 +12,13 @@ A hobby x86-64 operating system written from scratch in C and NASM assembly. Boo
 
 **Preemptive round-robin scheduler** — the APIC timer fires at ~1 kHz. The timer ISR saves all 15 GP registers, calls the C scheduler to pick the next thread, and `iretq`s into it. Threads get 64 KiB kernel stacks; user threads get separate user stacks and switch address spaces on context switch.
 
-**User-space processes** — ELF64 executables are loaded into per-process address spaces (ring 3). System calls go through `SYSCALL`/`SYSRET` with `swapgs` for per-CPU kernel stack switching. All user-pointer access goes through fault-recovering `copy_to/from_user` helpers, so a bad pointer returns `-EFAULT` instead of faulting the kernel. Syscalls span the file/process/socket surface: `read`, `write`, `open` (O_CREAT/O_TRUNC/O_APPEND), `close`, `stat`, `pipe`, `creat`, `mkdir`, `unlink`, `rename`, `chdir`, `getcwd`, `listdir`, `chmod`, `chown`, `exit`, `waitpid`, `getpid`, `kill`, `sleep`, `spawn`, `spawn_as`, `ps`, `meminfo`, `diskinfo`, `reboot`, the credential calls (`getuid`/`getgid`/`geteuid`/`getegid`/`setuid`/`setgid`/`seteuid`/`setegid`), and the network calls (`socket`, `connect`, `send`, `recv`, `dns_resolve`).
+**User-space processes** — ELF64 executables are loaded into per-process address spaces (ring 3). System calls go through `SYSCALL`/`SYSRET` with `swapgs` for per-CPU kernel stack switching. All user-pointer access goes through fault-recovering `copy_to/from_user` helpers, so a bad pointer returns `-EFAULT` instead of faulting the kernel. Syscalls span the file/process/socket surface: `read`, `write`, `open` (O_CREAT/O_TRUNC/O_APPEND), `close`, `stat`, `pipe`, `creat`, `mkdir`, `unlink`, `rmdir`, `rename`, `chdir`, `getcwd`, `listdir`, `chmod`, `chown`, `exit`, `waitpid`, `getpid`, `kill`, `sleep`, `spawn`, `spawn_as`, `ps`, `meminfo`, `diskinfo`, `reboot`, the credential calls (`getuid`/`getgid`/`geteuid`/`getegid`/`setuid`/`setgid`/`seteuid`/`setegid`), and the network calls (`socket`, `connect`, `send`, `recv`, `dns_resolve`).
 
-**Writable ext2 filesystem** — full read/write ext2 support including block/inode allocation, directory mutation (`create`, `mkdir`, `unlink`), and file truncation. The VFS layer exposes all operations to user processes. Data is persisted in a GPT disk image over AHCI (SATA), NVMe, or **USB mass storage** (xHCI → Bulk-Only Transport → SCSI); the root partition is located by content across all block devices, so the OS boots its full filesystem from a USB stick on real hardware.
+**Writable ext2 filesystem** — full read/write ext2 support including block/inode allocation, directory mutation (`create`, `mkdir`, `unlink`, `rmdir`), and file truncation. The VFS layer exposes all operations to user processes. Data is persisted in a GPT disk image over AHCI (SATA), NVMe, or **USB mass storage** (xHCI → Bulk-Only Transport → SCSI); the root partition is located by content across all block devices, so the OS boots its full filesystem from a USB stick on real hardware.
 
-**Multi-user login & permissions** — boots to a `login` prompt that authenticates against `/etc/passwd` and starts the shell as the logged-in user. Processes carry real/effective/saved UID & GID credentials; the ext2 layer enforces rwx permission bits, and the setuid bit on an executable elevates privilege on exec. `sudo`, `passwd`, `useradd`, and `userdel` manage users and run commands as root.
+**Multi-user login & permissions** — boots to a `login` prompt that authenticates against `/etc/shadow` (salted, iterated SHA-256; `/etc/passwd` carries no secrets) and starts the shell as the logged-in user. Processes carry real/effective/saved UID & GID credentials; the ext2 layer enforces rwx permission bits, and the setuid bit on an executable elevates privilege on exec. `sudo`, `passwd`, `useradd`, and `userdel` manage users and run commands as root.
 
-**Interactive shell** — runs in ring 3, supports built-in commands (`cd`, `pwd`, `ls`, `cat`, `echo`, `clear`, `uname`, `help`, `history`, `exit`) and spawns ELF binaries from the filesystem. Adds **pipelines (up to 4 stages), background jobs (`&`), Ctrl+C interrupt, `>` output redirection, and command history with up/down arrow recall**. The prompt shows the current working directory; relative paths are resolved against it.
+**Interactive shell** — runs in ring 3, supports built-in commands (`cd`, `pwd`, `ls`, `cat`, `echo`, `clear`, `uname`, `help`, `history`, `exit`) and spawns ELF binaries from the filesystem. Adds **pipelines (up to 4 stages), background jobs (`&`), Ctrl+C interrupt, `>` output redirection (in the `echo` builtin), and command history with up/down arrow recall**. The prompt shows the current working directory; relative paths are resolved against it.
 
 **tinylibc** — a minimal C library (`crt0`, `printf` with width specifiers, `malloc`/`free`/`calloc`/`realloc` with a free-list allocator, string functions, syscall wrappers) that lets user programs be written in C without any host libc dependency.
 
@@ -39,12 +39,12 @@ A hobby x86-64 operating system written from scratch in C and NASM assembly. Boo
 | Networking | e1000 NIC, ARP, DHCP, IPv4, ICMP, UDP, DNS, TCP — socket syscalls exposed to userland |
 | GUI | Framebuffer desktop, 8×16 font, windows, live kernel log |
 | Shell | built-ins + pipes (4 stages), `&` background jobs, Ctrl+C, `>`, history, ELF programs |
-| Userland | 33 programs via tinylibc (coreutils, users, net, sysinfo — see below) |
+| Userland | 34 programs via tinylibc (coreutils, users, net, sysinfo — see below) |
 | Sync | Spinlocks (incl. IRQ-safe), mutexes with wait queues; SMP-safe heap/PMM/VFS/sockets/pipes |
 | ACPI | RSDP → RSDT/XSDT → MADT parsing for LAPIC/IOAPIC discovery; ACPI poweroff/reboot |
 | Input | PS/2 keyboard (IRQ-driven) and USB HID keyboard (xHCI, boot protocol); merged into one console so the shell reads either |
 | Security | Real/effective/**saved** UID & GID, ext2 permission enforcement, setuid-on-exec, fault-recovering `copy_to/from_user` |
-| Multi-user | `login` against `/etc/passwd`, `sudo`/`passwd`/`useradd`/`userdel`, per-user shells |
+| Multi-user | `login` against `/etc/shadow`, `sudo`/`passwd`/`useradd`/`userdel`, per-user shells |
 
 ## Building
 
@@ -76,8 +76,9 @@ root
 /root # id
 uid=0(root) gid=0(root)
 /root # ls /bin
-cat  chmod  chown  cp  df  grep  ls  mkdir  mv  ps  rm  sudo  wc  wget  whoami  ...
-/root # cd /bin && ls cat            # relative paths resolve against cwd
+cat  chmod  chown  cp  df  grep  ls  mkdir  mv  ps  rm  rmdir  sudo  wc  wget  whoami  ...
+/root # cd /bin                      # relative paths resolve against cwd
+/bin # ls cat
 cat
 /bin # echo hello world > /tmp.txt
 /bin # cat /tmp.txt
@@ -136,7 +137,7 @@ kernel/
   test/          in-kernel test suites (8 suites)
 user/
   libc/          tinylibc (crt0, printf, free-list malloc, syscall wrappers)
-  bin/           33 programs (C source): coreutils (ls, cat, cp, mv, rm,
+  bin/           34 programs (C source): coreutils (ls, cat, cp, mv, rm, rmdir,
                  mkdir, touch, wc, head, tail, sort, grep, find, stat,
                  chmod, chown), users (login, sudo, passwd, useradd,
                  userdel, whoami, id), net (wget), sysinfo (ps, df, free,

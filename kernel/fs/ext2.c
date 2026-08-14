@@ -15,6 +15,10 @@
 #define EXT2_FT_REG_FILE  1U
 #define EXT2_FT_DIR       2U
 
+/* Size of the parent/name buffers every path_split caller declares.  path_split
+   bounds both of its outputs against this, so the two must stay in step. */
+#define PATH_SPLIT_MAX    256U
+
 typedef struct {
     uint32_t s_inodes_count;
     uint32_t s_blocks_count;
@@ -400,7 +404,15 @@ static void free_inode(ext2_fs_t *fs, uint32_t ino)
 
 /* Split an absolute path into parent dir path and leaf name.
    e.g. "/foo/bar" -> parent="/foo", name="bar"
-        "/foo"     -> parent="/",    name="foo"  */
+        "/foo"     -> parent="/",    name="foo"
+
+   Both output buffers are PATH_SPLIT_MAX bytes at every call site.  The leaf and
+   the parent are BOTH length-checked against that: paths arrive here straight
+   from userspace (sys_mkdir/creat/unlink/rename copy up to 512 bytes, and
+   vfs_resolve normalizes into a 512-byte buffer), so a long parent prefix used to
+   run off the end of a 256-byte kernel stack buffer -- and the kernel is built
+   -fno-stack-protector.  Refusing the path is correct: nothing on a filesystem we
+   created needs a component path this long. */
 static bool path_split(const char *path, char *parent, char *name)
 {
     const char *last = path;
@@ -410,11 +422,14 @@ static bool path_split(const char *path, char *parent, char *name)
     uint32_t name_len = 0;
     const char *n = last + 1;
     while (n[name_len]) name_len++;
-    if (name_len == 0 || name_len > 254) return false;
+    if (name_len == 0 || name_len > PATH_SPLIT_MAX - 2) return false;
+
+    uint32_t par_len = (uint32_t)(last - path);
+    if (par_len > PATH_SPLIT_MAX - 1) return false;
+
     memcpy(name, n, name_len);
     name[name_len] = '\0';
 
-    uint32_t par_len = (uint32_t)(last - path);
     if (par_len == 0) { parent[0] = '/'; parent[1] = '\0'; }
     else { memcpy(parent, path, par_len); parent[par_len] = '\0'; }
     return true;
@@ -521,6 +536,36 @@ static bool dir_add_entry(ext2_fs_t *fs, uint32_t dir_ino,
 }
 
 /* Remove a directory entry by name.  Sets inode=0 (soft delete). */
+/* True if `dir_inode` holds nothing but "." and "..".  Used by ext2_rmdir, which
+   must refuse a populated directory rather than orphan its contents. */
+static bool dir_is_empty(ext2_fs_t *fs, const ext2_inode_t *dir_inode)
+{
+    uint8_t *blk = kmalloc(fs->block_size);
+    if (!blk) return false;
+
+    bool empty = true;
+    for (int b = 0; b < 12 && empty; b++) {
+        uint32_t bno = dir_inode->i_block[b];
+        if (bno == 0) break;
+        if (!read_block(fs, bno, blk)) continue;
+
+        uint8_t *p = blk, *end = blk + fs->block_size;
+        while (p < end) {
+            ext2_dirent_t *de = (ext2_dirent_t *)p;
+            if (!dirent_valid(p, end)) break;
+            if (de->inode != 0) {
+                bool dot    = (de->name_len == 1 && de->name[0] == '.');
+                bool dotdot = (de->name_len == 2 && de->name[0] == '.' &&
+                               de->name[1] == '.');
+                if (!dot && !dotdot) { empty = false; break; }
+            }
+            p += de->rec_len;
+        }
+    }
+    kfree(blk);
+    return empty;
+}
+
 static bool dir_remove_entry(ext2_fs_t *fs, uint32_t dir_ino, const char *name)
 {
     uint8_t   name_len = (uint8_t)strlen(name);
@@ -914,33 +959,64 @@ int64_t ext2_write(ext2_fs_t *fs, uint32_t ino, uint64_t off,
     return (int64_t)written;
 }
 
+/* Free every block a singly-indirect block points at, then the block itself. */
+static void free_indirect(ext2_fs_t *fs, uint32_t indir_bno)
+{
+    if (!indir_bno) return;
+    uint8_t *indir = kmalloc(fs->block_size);
+    if (indir) {
+        if (read_block(fs, indir_bno, indir)) {
+            uint32_t ptrs = fs->block_size / 4;
+            for (uint32_t i = 0; i < ptrs; i++) {
+                uint32_t bno = ((uint32_t *)indir)[i];
+                if (bno) free_block(fs, bno);
+            }
+        }
+        kfree(indir);
+    }
+    free_block(fs, indir_bno);
+}
+
+/* Release every data block owned by `inode` and zero its block pointers.
+   Covers the 12 direct blocks, the singly-indirect block, and the
+   doubly-indirect tree.  The doubly-indirect case used to be skipped by both
+   truncate and unlink even though ext2_write allocates it, so every file over
+   ~268 KiB leaked its blocks permanently.  Triple-indirect is not supported by
+   ext2_write either, so there is nothing to free at i_block[14]. */
+static void free_inode_blocks(ext2_fs_t *fs, ext2_inode_t *inode)
+{
+    for (int b = 0; b < 12; b++) {
+        if (inode->i_block[b]) {
+            free_block(fs, inode->i_block[b]);
+            inode->i_block[b] = 0;
+        }
+    }
+
+    free_indirect(fs, inode->i_block[12]);
+    inode->i_block[12] = 0;
+
+    if (inode->i_block[13]) {
+        uint8_t *dbl = kmalloc(fs->block_size);
+        if (dbl) {
+            if (read_block(fs, inode->i_block[13], dbl)) {
+                uint32_t ptrs = fs->block_size / 4;
+                for (uint32_t i = 0; i < ptrs; i++)
+                    free_indirect(fs, ((uint32_t *)dbl)[i]);
+            }
+            kfree(dbl);
+        }
+        free_block(fs, inode->i_block[13]);
+        inode->i_block[13] = 0;
+    }
+}
+
 bool ext2_truncate(ext2_fs_t *fs, uint32_t ino)
 {
     if (!fs || ino < 2) return false;
     ext2_inode_t inode;
     if (!read_inode(fs, ino, &inode)) return false;
 
-    for (int b = 0; b < 12; b++) {
-        if (inode.i_block[b]) {
-            free_block(fs, inode.i_block[b]);
-            inode.i_block[b] = 0;
-        }
-    }
-    if (inode.i_block[12]) {
-        uint8_t *indir = kmalloc(fs->block_size);
-        if (indir) {
-            if (read_block(fs, inode.i_block[12], indir)) {
-                uint32_t ptrs = fs->block_size / 4;
-                for (uint32_t i = 0; i < ptrs; i++) {
-                    uint32_t bno = ((uint32_t *)indir)[i];
-                    if (bno) free_block(fs, bno);
-                }
-            }
-            kfree(indir);
-        }
-        free_block(fs, inode.i_block[12]);
-        inode.i_block[12] = 0;
-    }
+    free_inode_blocks(fs, &inode);
     inode.i_size   = 0;
     inode.i_blocks = 0;
     return write_inode(fs, ino, &inode);
@@ -949,7 +1025,7 @@ bool ext2_truncate(ext2_fs_t *fs, uint32_t ino)
 uint32_t ext2_create(ext2_fs_t *fs, const char *path, uint32_t uid, uint32_t gid)
 {
     if (!fs || !path) return 0;
-    char parent[256], name[256];
+    char parent[PATH_SPLIT_MAX], name[PATH_SPLIT_MAX];
     if (!path_split(path, parent, name)) return 0;
 
     uint32_t parent_ino = ext2_lookup_ino(fs, parent);
@@ -980,7 +1056,7 @@ uint32_t ext2_create(ext2_fs_t *fs, const char *path, uint32_t uid, uint32_t gid
 uint32_t ext2_mkdir(ext2_fs_t *fs, const char *path, uint32_t uid, uint32_t gid)
 {
     if (!fs || !path) return 0;
-    char parent[256], name[256];
+    char parent[PATH_SPLIT_MAX], name[PATH_SPLIT_MAX];
     if (!path_split(path, parent, name)) return 0;
 
     uint32_t parent_ino = ext2_lookup_ino(fs, parent);
@@ -1025,7 +1101,7 @@ uint32_t ext2_mkdir(ext2_fs_t *fs, const char *path, uint32_t uid, uint32_t gid)
 bool ext2_unlink(ext2_fs_t *fs, const char *path)
 {
     if (!fs || !path) return false;
-    char parent[256], name[256];
+    char parent[PATH_SPLIT_MAX], name[PATH_SPLIT_MAX];
     if (!path_split(path, parent, name)) return false;
 
     uint32_t parent_ino = ext2_lookup_ino(fs, parent);
@@ -1035,28 +1111,16 @@ bool ext2_unlink(ext2_fs_t *fs, const char *path)
     ext2_inode_t inode;
     if (!read_inode(fs, ino, &inode)) return false;
 
+    /* Unlinking a directory this way corrupted the filesystem: the link count
+       went 2 -> 1 rather than to zero, "." and ".." were left behind, the
+       parent's link count was never decremented, and every block the directory
+       owned was leaked.  Directories go through ext2_rmdir. */
+    if ((inode.i_mode & 0xf000U) == EXT2_IMODE_DIR) return false;
+
     if (inode.i_links_count > 0) inode.i_links_count--;
 
     if (inode.i_links_count == 0) {
-        /* Free data blocks. */
-        for (int b = 0; b < 12; b++) {
-            if (inode.i_block[b]) { free_block(fs, inode.i_block[b]); inode.i_block[b] = 0; }
-        }
-        if (inode.i_block[12]) {
-            uint8_t *indir = kmalloc(fs->block_size);
-            if (indir) {
-                if (read_block(fs, inode.i_block[12], indir)) {
-                    uint32_t ptrs = fs->block_size / 4;
-                    for (uint32_t i = 0; i < ptrs; i++) {
-                        uint32_t bno = ((uint32_t *)indir)[i];
-                        if (bno) free_block(fs, bno);
-                    }
-                }
-                kfree(indir);
-            }
-            free_block(fs, inode.i_block[12]);
-            inode.i_block[12] = 0;
-        }
+        free_inode_blocks(fs, &inode);
         inode.i_size   = 0;
         inode.i_blocks = 0;
         write_inode(fs, ino, &inode);
@@ -1066,6 +1130,42 @@ bool ext2_unlink(ext2_fs_t *fs, const char *path)
     }
 
     return dir_remove_entry(fs, parent_ino, name);
+}
+
+/* Remove an empty directory: drop its entry from the parent, release its blocks
+   and inode, and give the parent back the link that "." held. */
+bool ext2_rmdir(ext2_fs_t *fs, const char *path)
+{
+    if (!fs || !path) return false;
+    char parent[PATH_SPLIT_MAX], name[PATH_SPLIT_MAX];
+    if (!path_split(path, parent, name)) return false;
+
+    uint32_t parent_ino = ext2_lookup_ino(fs, parent);
+    uint32_t ino        = ext2_lookup_ino(fs, path);
+    if (!parent_ino || !ino) return false;
+    if (ino == EXT2_ROOT_INO) return false;   /* never remove / */
+
+    ext2_inode_t inode;
+    if (!read_inode(fs, ino, &inode)) return false;
+    if ((inode.i_mode & 0xf000U) != EXT2_IMODE_DIR) return false;
+    if (!dir_is_empty(fs, &inode)) return false;
+
+    if (!dir_remove_entry(fs, parent_ino, name)) return false;
+
+    free_inode_blocks(fs, &inode);
+    inode.i_size        = 0;
+    inode.i_blocks      = 0;
+    inode.i_links_count = 0;
+    write_inode(fs, ino, &inode);
+    free_inode(fs, ino);
+
+    /* The child's ".." no longer references the parent. */
+    ext2_inode_t pinode;
+    if (read_inode(fs, parent_ino, &pinode)) {
+        if (pinode.i_links_count > 0) pinode.i_links_count--;
+        write_inode(fs, parent_ino, &pinode);
+    }
+    return true;
 }
 
 bool ext2_rename(ext2_fs_t *fs, const char *old_path, const char *new_path)
@@ -1079,8 +1179,8 @@ bool ext2_rename(ext2_fs_t *fs, const char *old_path, const char *new_path)
     uint32_t early_dst = ext2_lookup_ino(fs, new_path);
     if (early_dst && early_dst == src_ino) return true;
 
-    char src_parent[256], src_name[256];
-    char dst_parent[256], dst_name[256];
+    char src_parent[PATH_SPLIT_MAX], src_name[PATH_SPLIT_MAX];
+    char dst_parent[PATH_SPLIT_MAX], dst_name[PATH_SPLIT_MAX];
     if (!path_split(old_path, src_parent, src_name)) return false;
     if (!path_split(new_path, dst_parent, dst_name)) return false;
 

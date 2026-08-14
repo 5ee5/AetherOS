@@ -117,11 +117,16 @@ LIBC_OBJS := $(LIBC_SRCS:$(LIBC_DIR)/src/%.c=$(BUILD_DIR)/libc/%.o)
 LIBC_CRT0 := $(BUILD_DIR)/libc/crt0.o
 LIBC_A    := $(BUILD_DIR)/libc.a
 
+# -mgeneral-regs-only: the context switch (sched_asm.asm SCHED_ENTRY) saves the 15
+# GP registers and nothing else -- there is no fxsave/fxrstor anywhere in the
+# kernel.  Without this flag GCC emits SSE for struct copies and inlined memcpy,
+# so two user processes sharing a CPU silently corrupt each other's XMM state.
+# Remove it only once the scheduler actually saves FPU state.
 USER_CFLAGS := -std=c11 -ffreestanding -fno-builtin -fno-stack-protector \
-               -fno-stack-check -m64 -mno-red-zone -O2 -Wall -Wextra \
-               -Wno-unused-parameter -I$(LIBC_DIR)/include
+               -fno-stack-check -m64 -mno-red-zone -mgeneral-regs-only -O2 \
+               -Wall -Wextra -Werror -Wno-unused-parameter -I$(LIBC_DIR)/include
 
-USER_BIN_NAMES := ls cat wc uname pwd mkdir rm cp mv wget grep touch head tail sort find login whoami id passwd useradd userdel sudo poweroff reboot sleep kill ps chmod chown stat free df
+USER_BIN_NAMES := ls cat wc uname pwd mkdir rm rmdir cp mv wget grep touch head tail sort find login whoami id passwd useradd userdel sudo poweroff reboot sleep kill ps chmod chown stat free df
 USER_ELFS := $(USER_BIN_NAMES:%=$(BUILD_DIR)/bin/%.elf)
 
 # Host-side password hash generator.  Built with the HOST compiler from the same

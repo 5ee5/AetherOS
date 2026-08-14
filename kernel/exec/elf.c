@@ -14,6 +14,14 @@
 #define USER_STACK_TOP   0x800000000000ULL   /* exclusive: first byte above stack */
 #define USER_STACK_BASE  (USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE)
 
+/* Ceiling on the pages one image may map (64 MiB).  p_memsz is attacker-chosen
+   and bounded only by the user address range, so without this a single crafted
+   header drives the mapping loop until the PMM is empty -- a whole-machine
+   memory DoS from an unprivileged spawn, well before the failure path unwinds.
+   Far above anything this system's programs need; the user heap is a 256 KiB
+   static arena. */
+#define ELF_MAX_PAGES    16384ULL
+
 static uint64_t div_ceil(uint64_t n, uint64_t d)
 {
     return (n + d - 1U) / d;
@@ -50,6 +58,14 @@ bool elf_load(const void *image, uint64_t size, elf_load_result_t *out)
         serial_write("elf: no program headers\n");
         return false;
     }
+    /* A zero (or undersized) e_phentsize makes phdr_off constant, so the same
+       PT_LOAD is processed e_phnum times -- and vmm_space_map overwrites an
+       existing PTE without freeing the page under it, so each repeat leaks a
+       page that vmm_space_destroy will never see. */
+    if (eh->e_phentsize < sizeof(struct elf64_phdr)) {
+        serial_write("elf: bad e_phentsize\n");
+        return false;
+    }
 
     /* Create a fresh address space. */
     uint64_t cr3 = vmm_space_create();
@@ -59,6 +75,7 @@ bool elf_load(const void *image, uint64_t size, elf_load_result_t *out)
     }
 
     /* Load each PT_LOAD segment. */
+    uint64_t total_pages = 0;
     for (uint16_t i = 0; i < eh->e_phnum; ++i) {
         uint64_t phdr_off = eh->e_phoff + (uint64_t)i * eh->e_phentsize;
         /* Overflow-safe bounds check: reject if the addition wrapped past
@@ -103,6 +120,11 @@ bool elf_load(const void *image, uint64_t size, elf_load_result_t *out)
             goto fail;
         }
         uint64_t npages = div_ceil(vend - vbase, PAGE_SIZE);
+        total_pages += npages;
+        if (total_pages > ELF_MAX_PAGES) {
+            serial_write("elf: image wants too many pages\n");
+            goto fail;
+        }
 
         const uint8_t *src = (const uint8_t *)image + ph->p_offset;
         uint64_t bytes_left = ph->p_filesz;
