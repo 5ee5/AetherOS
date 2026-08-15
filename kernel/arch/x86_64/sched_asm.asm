@@ -3,6 +3,7 @@ bits 64
 section .text
 
 extern sched_tick
+extern sched_finish_switch
 extern sched_yield_tick
 extern thread_exit
 
@@ -57,6 +58,12 @@ global %1
     mov rdi, rsp        ; pass current RSP to the handler
     call %2             ; returns new RSP (may be a different thread)
     mov rsp, rax        ; switch to new stack
+
+    ; We are now off the outgoing thread's stack, so it is finally safe to let
+    ; another CPU resume it.  Clobbering registers here is harmless: every one of
+    ; them is restored by the pops immediately below, and the call pushes below
+    ; RSP, under the saved frame.
+    call sched_finish_switch
 
     pop r15
     pop r14

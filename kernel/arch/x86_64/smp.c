@@ -6,11 +6,15 @@
 #include "acpi/acpi.h"
 #include "arch/x86_64/apic.h"
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/gdt.h"
+#include "arch/x86_64/idt.h"
+#include "arch/x86_64/tss.h"
 #include "core/panic.h"
 #include "core/serial.h"
 #include "mem/heap.h"
 #include "mem/vmm.h"
 #include "sched/sched.h"
+#include "syscall/syscall.h"
 
 /* Physical address of the AP startup trampoline. */
 #define TRAMPOLINE_PHYS 0x8000ULL
@@ -98,6 +102,14 @@ static bool start_ap(uint8_t target_id, uint64_t entry, uint64_t stack_top)
 	return false;
 }
 
+/* CPUs actually running, including the BSP.  Set once smp_init finishes. */
+static uint32_t s_cpus_online = 1U;
+
+uint32_t smp_cpus_online(void)
+{
+	return s_cpus_online;
+}
+
 uint32_t smp_init(const struct acpi_madt_info *madt)
 {
 	if (madt->cpu_count <= 1U) {
@@ -150,14 +162,46 @@ uint32_t smp_init(const struct acpi_madt_info *madt)
 		}
 	}
 
+	s_cpus_online = 1U + started;
 	return started;
 }
 
+/* Next free per-CPU GDT/TSS slot.  Slot 0 belongs to the BSP.  APs are brought
+   up one at a time (start_ap waits for TRAM_READY before the next SIPI), but an
+   atomic increment costs nothing and keeps this correct if that ever changes. */
+static uint32_t s_next_cpu_slot = 1;
+
 void ap_entry(void)
 {
-	/* Per-CPU registers: an AP that skipped this would run the same kernel
-	   with NX/SMEP/SMAP silently off. */
+	uint32_t slot = __atomic_fetch_add(&s_next_cpu_slot, 1U, __ATOMIC_SEQ_CST);
+	if (slot >= MAX_CPUS) {
+		serial_write("smp: too many CPUs, parking this one\n");
+		for (;;) {
+			__asm__ volatile("cli; hlt");
+		}
+	}
+
+	/* Everything below is per-CPU state that an AP does NOT inherit from the
+	   BSP.  None of it used to be set up here at all: the AP ran on the
+	   trampoline's temporary 4-entry GDT (no user selectors), with the IDTR
+	   left by INIT, a null TR, and SYSCALL disabled.  It survived only because
+	   lapic_ap_init failed to arm the timer, so no thread was ever dispatched
+	   and none of that state was ever exercised.  Arming the timer without
+	   this would have faulted the machine on the first tick. */
+
+	/* GDT first: ltr writes into it, and it must describe this CPU's TSS. */
+	x86_64_gdt_init_cpu(slot);
+	/* IDTR is per-CPU; the table behind it is shared. */
+	x86_64_idt_load();
+	/* Own TSS: rsp[0] is the stack used on ring3->ring0, so it cannot be
+	   shared, and IST1 gives this CPU a valid double-fault stack. */
+	tss_init_ap(slot);
+	/* EFER.SCE / STAR / LSTAR / FMASK are per-CPU MSRs: without these a
+	   `syscall` executed on this core is #UD. */
+	syscall_init();
+	/* NX/SMEP/SMAP live in per-CPU EFER and CR4. */
 	cpu_enable_protections();
+
 	lapic_ap_init();
 	sched_ap_enter();
 	/* Enter the idle loop — the timer ISR will context-switch away. */

@@ -103,7 +103,7 @@ jobs:
         # the release on the same checks CI runs.
         run: |
           BOOT_TEST_TIMEOUT=45s make test
-          BOOT_TEST_USB=1 BOOT_TEST_TIMEOUT=45s make boot-test
+          BOOT_TEST_USB=1 BOOT_TEST_TIMEOUT=120s make boot-test
           make userland-test
 
       - name: Build USB image

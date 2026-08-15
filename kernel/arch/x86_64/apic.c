@@ -40,6 +40,14 @@
 /* TSC ticks per millisecond, measured against the PIT in apic_timer_init. */
 static uint64_t s_tsc_per_ms;
 
+/* The timer period the BSP measured against the PIT, published so every AP can
+   arm its own timer with it.  An AP cannot calibrate for itself: the PIT is a
+   single shared device, and lapic_ap_init used to read LAPIC_TIMER_INITCNT
+   expecting to find this value there -- but that register is per-CPU and reads
+   as 0 after INIT, so the AP wrote 0 back, which *disables* the timer.  Every AP
+   then sat in its idle loop forever and no thread ever ran on a second core. */
+static uint32_t s_timer_period;
+
 static inline uint64_t rdtsc(void)
 {
 	uint32_t lo, hi;
@@ -179,6 +187,7 @@ uint64_t apic_timer_init(void)
 	if (period == 0) {
 		period = 1;
 	}
+	s_timer_period = period;
 	lapic_write(LAPIC_TIMER_INITCNT, period);
 	lapic_write(LAPIC_LVT_TIMER,
 		LAPIC_TIMER_PERIODIC | APIC_TIMER_VECTOR);
@@ -196,8 +205,15 @@ void lapic_ap_init(void)
 		LAPIC_SPURIOUS_ENABLE | (LAPIC_SPURIOUS_VECTOR & 0xffU) | 0xf0U);
 	lapic_write(LAPIC_TPR, 0);
 
-	/* Arm timer using the same period the BSP measured. */
-	uint32_t period = lapic_read(LAPIC_TIMER_INITCNT);
+	/* Arm the timer with the period the BSP measured (see s_timer_period).
+	   Divider first, then the count: writing INITCNT is what starts the timer. */
+	uint32_t period = s_timer_period;
+	if (period == 0) {
+		/* apic_timer_init never ran, so there is nothing to arm with.  Leave the
+		   timer masked rather than writing 0, which would silently disable it. */
+		serial_write("lapic: ap timer not armed (BSP period unset)\n");
+		return;
+	}
 	lapic_write(LAPIC_TIMER_DCR, LAPIC_DCR_DIV16);
 	lapic_write(LAPIC_TIMER_INITCNT, period);
 	lapic_write(LAPIC_LVT_TIMER, LAPIC_TIMER_PERIODIC | APIC_TIMER_VECTOR);
@@ -211,6 +227,17 @@ void lapic_eoi(void)
 uint32_t lapic_id(void)
 {
 	return lapic_read(LAPIC_ID) >> 24U;
+}
+
+/* Fixed-delivery IPI to every CPU except this one, using the ICR's
+   "all excluding self" destination shorthand (bits 19:18 = 11b), which makes
+   the destination field irrelevant. */
+void lapic_broadcast_ipi(uint8_t vector)
+{
+	lapic_write(LAPIC_ICR_LO, 0x000C4000U | (uint32_t)vector);
+	while (lapic_read(LAPIC_ICR_LO) & (1U << 12U)) {
+		__asm__ volatile("pause");
+	}
 }
 
 void lapic_send_ipi(uint8_t target_lapic_id, uint32_t icr_lo)

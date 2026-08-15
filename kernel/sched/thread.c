@@ -146,7 +146,33 @@ struct thread *thread_create_idle(void)
 	t->kstack_top = (uint64_t)(uintptr_t)t->kstack + THREAD_KSTACK_SIZE;
 	t->is_idle = true;
 	t->state   = THREAD_RUNNING;
-	/* rsp set on first preemption. */
+
+	/* Give the idle thread a real initial frame instead of leaving rsp at 0 to
+	   be "set on first preemption".  That held only while an idle thread could
+	   never be *dispatched* before it had first been switched away from: the
+	   run queue always contained the current thread, so rq_take never came back
+	   empty.  It does now -- every queued thread can be momentarily unavailable
+	   while it finishes switching off another CPU -- and dispatching an idle
+	   thread with rsp == 0 makes the scheduler stub load RSP=0 and double-fault.
+	   Entering here simply runs the idle loop, which is what the CPU would be
+	   doing anyway. */
+	uint64_t *stack_top =
+		(uint64_t *)((char *)t->kstack + THREAD_KSTACK_SIZE);
+	uint64_t *frame = stack_top - FRAME_QWORDS;
+
+	for (int i = 0; i < FRAME_QWORDS; ++i) {
+		frame[i] = 0;
+	}
+
+	frame[IDX_RSI]    = (uint64_t)(uintptr_t)sched_idle_loop;  /* fn  */
+	frame[IDX_RDI]    = 0;                                     /* arg */
+	frame[IDX_RIP]    = (uint64_t)(uintptr_t)thread_run_trampoline;
+	frame[IDX_CS]     = 0x08ULL;
+	frame[IDX_RFLAGS] = 0x202ULL;            /* IF=1 */
+	frame[IDX_RSP]    = (uint64_t)(uintptr_t)stack_top;
+	frame[IDX_SS]     = 0x10ULL;
+
+	t->rsp = (uint64_t)(uintptr_t)frame;
 	return t;
 }
 

@@ -27,6 +27,8 @@ extern void sched_idle_loop(void);
 static spinlock_t rq_lock = SPINLOCK_INIT;
 static struct thread *rq_head;
 static struct thread *rq_tail;
+/* Entries currently queued, so rq_take can bound how far it rotates. */
+static uint32_t rq_len;
 
 /* Timer interrupts taken, summed across CPUs — so still not a wall clock, since
    every CPU contributes its own.  Voluntary yields no longer inflate it (they come
@@ -57,6 +59,7 @@ static bool sleep_unlink_locked(struct thread *t)
 
 static void rq_add(struct thread *t)
 {
+	rq_len++;
 	t->run_next = NULL;
 	if (rq_tail) {
 		rq_tail->run_next = t;
@@ -66,21 +69,47 @@ static void rq_add(struct thread *t)
 	rq_tail = t;
 }
 
-static struct thread *rq_take(void)
+/* Take the first runnable thread that is not still switching off some *other*
+   CPU.  A thread stays on_cpu until that CPU's sched_finish_switch runs, a
+   window of a few instructions; rotating it to the back is cheaper than
+   spinning, and the caller falls back to the idle thread if every entry is
+   busy.
+
+   `self` is the thread this CPU is switching away from.  It was just requeued
+   and still has on_cpu set, but picking it is safe -- schedule() then leaves the
+   stack untouched, because there is no switch at all when next == cur.  Without
+   this exception a single runnable thread would skip itself and drop to idle on
+   every tick. */
+static struct thread *rq_take(struct thread *self)
 {
-	if (rq_head == NULL) {
-		return NULL;
+	uint32_t scanned = 0;
+	uint32_t queued  = rq_len;
+
+	while (rq_head != NULL && scanned < queued) {
+		struct thread *t = rq_head;
+		rq_head = t->run_next;
+		if (rq_head == NULL) {
+			rq_tail = NULL;
+		}
+		t->run_next = NULL;
+		rq_len--;
+
+		if (!t->on_cpu || t == self) {
+			return t;
+		}
+		/* Still on another CPU's stack: put it back and try the next. */
+		rq_add(t);
+		scanned++;
 	}
-	struct thread *t = rq_head;
-	rq_head = t->run_next;
-	if (rq_head == NULL) {
-		rq_tail = NULL;
-	}
-	t->run_next = NULL;
-	return t;
+	return NULL;
 }
 
 /* ---- Per-CPU state ----------------------------------------------------- */
+
+/* The thread this CPU switched away from on its last pass through schedule(),
+   whose on_cpu flag may only be cleared once we are genuinely off its stack.
+   See sched_finish_switch. */
+static struct thread *prev_off_cpu[MAX_CPUS];
 
 static struct thread *cpu_current[MAX_CPUS];
 static struct thread *cpu_idle[MAX_CPUS];
@@ -122,6 +151,12 @@ void sched_init(void)
 
 	/* Set up per-CPU GS-base data for SYSCALL/SYSRET. */
 	cpu_local_init(cpu);
+
+	/* tss_init ran before the LAPIC was mapped, so it could not record which
+	   CPU owns slot 0.  Do it now: tss_set_rsp0 looks the running CPU up in
+	   this mapping, and it must be in place before any user thread is
+	   dispatched. */
+	tss_bind_current(0);
 
 	serial_write("sched: init cpu=");
 	serial_write_dec(cpu);
@@ -348,23 +383,27 @@ static uint64_t schedule(uint64_t old_rsp, bool from_timer)
 	/* Never dispatch a corpse.  A thread killed while sitting READY in the run
 	   queue is still linked here; dispatching it would iretq straight back into
 	   a process that has already been torn down.  Drop it and take the next. */
-	struct thread *next = rq_take();
+	struct thread *next = rq_take(cur);
 	while (next != NULL && next->state == THREAD_DEAD) {
 		if (!next->on_cpu) {
 			next->sleep_next = zombie_head;
 			zombie_head      = next;
 		}
-		next = rq_take();
+		next = rq_take(cur);
 	}
 	if (next == NULL) {
 		next = cpu_idle[cpu];
 	}
 	next->state      = THREAD_RUNNING;
-	/* Hand off the on_cpu marker: cur's context was saved above, so clearing
-	   its flag lets a waker on another CPU safely enqueue it; mark the incoming
-	   thread as running on this CPU.  (See sched_wake.) */
+	/* Do NOT clear cur->on_cpu here.  schedule() is still executing *on cur's
+	   kernel stack* -- the switch happens when the assembly stub does
+	   `mov rsp, rax` after this returns, and the C epilogue below uses that
+	   stack until then.  Publishing cur as no longer on-CPU while another CPU
+	   can immediately dequeue and resume it put two CPUs on one kernel stack,
+	   which corrupted the frame and double-faulted.  Hand it to
+	   sched_finish_switch, which the stub calls once we are off the stack. */
 	if (cur != next) {
-		cur->on_cpu = false;
+		prev_off_cpu[cpu] = cur;
 	}
 	next->on_cpu     = true;
 	cpu_current[cpu] = next;
@@ -426,6 +465,21 @@ void sched_ap_prepare(uint32_t cpu_id)
 	}
 	/* Allocate on the BSP before the AP is started so no alloc races with tests. */
 	cpu_idle[cpu_id] = thread_create_idle();
+}
+
+/* Called by the scheduler assembly stub immediately after `mov rsp, rax`, i.e.
+   at the first instant this CPU is provably no longer using the outgoing
+   thread's kernel stack.  Only now may that thread be advertised as free for
+   another CPU to resume; doing it earlier (inside schedule(), which still runs
+   on that very stack) let two CPUs execute on one stack and double-fault. */
+void sched_finish_switch(void)
+{
+	uint32_t cpu = current_cpu_id();
+	struct thread *prev = prev_off_cpu[cpu];
+	if (prev != NULL) {
+		prev_off_cpu[cpu] = NULL;
+		__atomic_store_n(&prev->on_cpu, false, __ATOMIC_SEQ_CST);
+	}
 }
 
 void sched_ap_enter(void)

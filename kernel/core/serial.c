@@ -13,6 +13,15 @@ static uint32_t s_log_read;
 /* Guards the log ring indices against concurrent writers/readers (any CPU). */
 static spinlock_t s_log_lock = SPINLOCK_INIT;
 
+/* Serializes a whole message on the wire.  s_log_lock only ever protected the
+   in-memory ring; the UART itself was written a character at a time with
+   nothing held, so once a second CPU started running threads its output
+   interleaved mid-word with the BSP's ("sahci: found at yscall: SYSCALL...").
+   That corrupts the boot log the smoke test greps and makes any SMP failure
+   much harder to read.
+   Order: s_tx_lock -> s_log_lock.  Nothing takes them the other way. */
+static spinlock_t s_tx_lock = SPINLOCK_INIT;
+
 static int serial_ready;
 
 static int transmit_empty(void)
@@ -82,21 +91,31 @@ uint32_t serial_log_read(char *buf, uint32_t size)
 	return avail;
 }
 
-void serial_write(const char *text)
+/* Emits `text` with the transmit lock already held. */
+static void serial_write_locked(const char *text)
 {
 	while (*text != '\0') {
 		serial_write_char(*text++);
 	}
 }
 
+void serial_write(const char *text)
+{
+	uint64_t f = spinlock_acquire_irqsave(&s_tx_lock);
+	serial_write_locked(text);
+	spinlock_release_irqrestore(&s_tx_lock, f);
+}
+
 void serial_write_hex(uint64_t value)
 {
 	static const char digits[] = "0123456789abcdef";
 
-	serial_write("0x");
+	uint64_t f = spinlock_acquire_irqsave(&s_tx_lock);
+	serial_write_locked("0x");
 	for (int shift = 60; shift >= 0; shift -= 4) {
 		serial_write_char(digits[(value >> (uint32_t)shift) & 0xfU]);
 	}
+	spinlock_release_irqrestore(&s_tx_lock, f);
 }
 
 void serial_write_dec(uint64_t value)
@@ -106,13 +125,12 @@ void serial_write_dec(uint64_t value)
 	buffer[--index] = '\0';
 
 	if (value == 0) {
-		serial_write_char('0');
-		return;
-	}
-
-	while (value != 0 && index != 0) {
-		buffer[--index] = (char)('0' + (value % 10U));
-		value /= 10U;
+		buffer[--index] = '0';
+	} else {
+		while (value != 0 && index != 0) {
+			buffer[--index] = (char)('0' + (value % 10U));
+			value /= 10U;
+		}
 	}
 
 	serial_write(&buffer[index]);

@@ -9,4 +9,7 @@ uint32_t smp_init(const struct acpi_madt_info *madt);
 /* AP C entry point — called from the trampoline after entering 64-bit mode. */
 void ap_entry(void);
 
+/* Number of CPUs actually running, including the BSP.  1 until smp_init runs. */
+uint32_t smp_cpus_online(void);
+
 #endif

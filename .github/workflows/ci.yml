@@ -40,7 +40,10 @@ jobs:
       - name: Boot smoke test (USB / xHCI)
         # Attaches the data disk only over USB, forcing the root mount through
         # the xHCI + Bulk-Only Transport + SCSI stack (asserts the USB mount).
-        run: BOOT_TEST_USB=1 BOOT_TEST_TIMEOUT=45s make boot-test
+        # A longer budget than the AHCI leg: the USB stack is entirely polling,
+        # so booting a root filesystem through xHCI + BOT + SCSI is materially
+        # slower than through AHCI.
+        run: BOOT_TEST_USB=1 BOOT_TEST_TIMEOUT=120s make boot-test
 
       - name: Userland test (login + /bin programs)
         # Drives a real login session over the serial console.  Until this

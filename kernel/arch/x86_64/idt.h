@@ -29,6 +29,10 @@ struct x86_64_interrupt_frame {
 };
 
 void x86_64_idt_init(void);
+
+/* Load the (shared) IDT into this CPU's IDTR.  Every AP must call it: IDTR is
+   per-CPU and is not inherited from the BSP. */
+void x86_64_idt_load(void);
 void x86_64_exception_dispatch(struct x86_64_interrupt_frame *frame);
 void idt_install_gate(uint8_t vector, void (*handler)(void), uint8_t ist);
 

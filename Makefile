@@ -29,6 +29,7 @@ KERNEL_C_SRCS := \
 	kernel/arch/x86_64/ioapic.c \
 	kernel/arch/x86_64/smp.c \
 	kernel/arch/x86_64/tss.c \
+	kernel/arch/x86_64/tlb.c \
 	kernel/block/gpt.c \
 	kernel/core/fb.c \
 	kernel/core/panic.c \
@@ -97,6 +98,7 @@ KERNEL_ASM_SRCS := \
 	kernel/arch/x86_64/syscall_entry.asm \
 	kernel/arch/x86_64/smp_trampoline_blob.asm \
 	kernel/drivers/ps2kbd_isr.asm \
+	kernel/arch/x86_64/tlb_isr.asm \
 	user/hello/hello_blob.asm \
 	user/shell/shell_blob.asm
 

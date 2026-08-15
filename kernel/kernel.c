@@ -9,6 +9,7 @@
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/ioapic.h"
 #include "arch/x86_64/smp.h"
+#include "arch/x86_64/tlb.h"
 #include "arch/x86_64/tss.h"
 #include "arch/x86_64/io.h"
 #include "drivers/ahci.h"
@@ -148,6 +149,9 @@ void kernel_main(const struct os_boot_info *boot_info)
 	syscall_init();
 
 	x86_64_idt_init();
+	/* Shootdown IPI gate.  Harmless before the APs exist: with one CPU online
+	   tlb_shootdown_page is a no-op. */
+	tlb_init();
 	serial_write("kernel: idt installed\n");
 
 	fb_init(&boot_info->framebuffer, boot_info->direct_map_base);
@@ -181,7 +185,10 @@ void kernel_main(const struct os_boot_info *boot_info)
 	sched_init();
 	serial_write("kernel: scheduler online\n");
 
-	smp_init(madt);
+	uint32_t aps = smp_init(madt);
+	/* From here on a kernel-half unmap or permission change must be broadcast:
+	   the page tables above the direct map are shared by every CPU. */
+	tlb_set_cpu_count(1U + aps);
 	serial_write("kernel: smp init done\n");
 
 	run_early_self_checks();

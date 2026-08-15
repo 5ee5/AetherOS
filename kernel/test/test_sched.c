@@ -3,7 +3,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "arch/x86_64/apic.h"
+#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/io.h"
+#include "arch/x86_64/smp.h"
+#include "core/serial.h"
 #include "mem/heap.h"
 #include "sched/sched.h"
 #include "sched/thread.h"
@@ -122,6 +126,89 @@ static void defer_victim(void *arg)
 }
 
 /* ---- Test runner ------------------------------------------------------- */
+
+/* ---- Threads must actually run on more than one CPU ----------------------- */
+
+#define SMP_PROBE_THREADS 4
+#define SMP_PROBE_ITERS   64
+
+static volatile uint32_t s_smp_seen[MAX_CPUS];
+static volatile uint32_t s_smp_distinct;
+static volatile uint32_t s_smp_finished;
+
+static void smp_probe_thread(void *arg)
+{
+	(void)arg;
+	/* Run long enough to be preempted and possibly migrate, recording every CPU
+	   this thread is observed on.  Stop as soon as a second CPU has been seen by
+	   anyone: the whole point is proving work reaches more than one core, and
+	   the USB boot path is slow enough that spinning past that wastes most of
+	   the smoke test's time budget. */
+	for (int i = 0; i < SMP_PROBE_ITERS; ++i) {
+		uint32_t id = lapic_id();
+		if (id < MAX_CPUS && s_smp_seen[id] == 0U) {
+			s_smp_seen[id] = 1U;
+			__atomic_fetch_add(&s_smp_distinct, 1U, __ATOMIC_SEQ_CST);
+		}
+		if (i >= 8 && __atomic_load_n(&s_smp_distinct, __ATOMIC_SEQ_CST) > 1U) {
+			break;
+		}
+		thread_yield();
+	}
+	__atomic_fetch_add(&s_smp_finished, 1U, __ATOMIC_SEQ_CST);
+}
+
+/* Every AP used to arm its timer with a period read from its own (zeroed)
+   LAPIC register, which disabled the timer outright, so no AP ever ran a
+   thread and the second core was decorative.  Assert that work really does
+   land on more than one CPU when more than one is online. */
+static void test_smp_threads_run_on_all_cpus(void)
+{
+	uint32_t cpus = smp_cpus_online();
+
+	/* Preemption (and therefore any migration to an AP) needs interrupts. */
+	__asm__ volatile("sti" ::: "memory");
+
+	for (uint32_t i = 0; i < MAX_CPUS; ++i) {
+		s_smp_seen[i] = 0U;
+	}
+	s_smp_distinct = 0U;
+	s_smp_finished = 0U;
+
+	for (int i = 0; i < SMP_PROBE_THREADS; ++i) {
+		KTEST_ASSERT(thread_create(smp_probe_thread, NULL) != NULL);
+	}
+
+	for (int spins = 0; spins < 200000 &&
+	     __atomic_load_n(&s_smp_finished, __ATOMIC_SEQ_CST) < SMP_PROBE_THREADS;
+	     ++spins) {
+		thread_yield();
+	}
+	KTEST_ASSERT(__atomic_load_n(&s_smp_finished, __ATOMIC_SEQ_CST) ==
+		     SMP_PROBE_THREADS);
+
+	uint32_t distinct = 0;
+	for (uint32_t i = 0; i < MAX_CPUS; ++i) {
+		if (s_smp_seen[i]) {
+			distinct++;
+		}
+	}
+
+	serial_write("ktest: threads observed on ");
+	serial_write_dec(distinct);
+	serial_write(" of ");
+	serial_write_dec(cpus);
+	serial_write(" cpus\n");
+
+	/* With a single CPU online, one is the correct answer. */
+	if (cpus > 1U) {
+		KTEST_ASSERT(distinct > 1U);
+	} else {
+		KTEST_ASSERT(distinct == 1U);
+	}
+
+	__asm__ volatile("cli" ::: "memory");
+}
 
 void test_sched_run(void)
 {
@@ -254,4 +341,6 @@ void test_sched_run(void)
 	   the assertion the filesystem wedge would have failed. */
 	KTEST_ASSERT(mutex_try_lock(&defer_mutex));
 	mutex_unlock(&defer_mutex);
+
+	test_smp_threads_run_on_all_cpus();
 }

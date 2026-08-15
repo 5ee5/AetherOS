@@ -19,6 +19,7 @@
 #include "proc/pipe.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 #include "sched/thread.h"
 #include "os/socket.h"
 #include "security/cred.h"
@@ -287,10 +288,23 @@ static int64_t sys_open(uint64_t path_virt, uint64_t flags, uint64_t mode)
    side by side leaves exactly one ordered queue with one consumer: a watcher
    that only wants to spot Ctrl+C can then peek it without dequeuing a keystroke
    that belongs to whoever is really reading the console. */
+/* Draining COM1 has to be atomic across CPUs.  Two call sites pull from it --
+   sys_read's console path and sys_waitpid's Ctrl+C watcher -- and each did
+   read-a-char-then-push-a-char with nothing held.  On one CPU that is harmless;
+   once a second CPU actually began running threads, the two interleaved between
+   the read and the push and delivered characters to the input ring out of
+   order, so a typed "/bin/rm ..." reached the shell as "/in/rm ..." with the
+   'b' arriving after the newline, on the *next* line.  input_push has its own
+   lock, but that only protects the ring, not the read/push pair.
+   Order: console_lock -> the input ring's lock. */
+static spinlock_t console_lock = SPINLOCK_INIT;
+
 static void console_fill(void)
 {
+    uint64_t f = spinlock_acquire_irqsave(&console_lock);
     for (char c = serial_read_char(); c; c = serial_read_char())
         input_push(c);
+    spinlock_release_irqrestore(&console_lock, f);
 }
 
 static int64_t sys_read_stdin(void *buf, uint32_t count)

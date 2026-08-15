@@ -3,10 +3,30 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "arch/x86_64/tlb.h"
 #include "core/panic.h"
 #include "core/serial.h"
 #include "lib/string.h"
 #include "mem/pmm.h"
+#include "sync/spinlock.h"
+
+/* Serializes every mutation of a page table, in any address space.
+ *
+ * There was no lock here at all.  Two CPUs mapping addresses that share a PDPT
+ * or PD -- two kernel threads growing the heap, say -- could both observe the
+ * intermediate entry absent, both allocate a table page, and both store: the
+ * loser's table leaks and every PTE already installed through it is silently
+ * lost.  heap_lock does not cover this, because elf_load reaches vmm_space_map
+ * holding nothing at all.
+ *
+ * IRQ-safe, because schedule() calls vmm_space_destroy straight from the timer
+ * ISR.  Holding it with interrupts off also means the scheduler cannot preempt
+ * a CPU that owns the lock, so it can never deadlock against itself.
+ *
+ * Lock order: vmm_lock -> pmm_lock (these paths allocate and free page-table
+ * pages).  Nothing takes them the other way round; the PMM never calls the VMM.
+ */
+static spinlock_t vmm_lock;
 
 #define PAGE_PRESENT  0x001ULL
 #define PAGE_WRITABLE 0x002ULL
@@ -274,7 +294,7 @@ bool vmm_pde_peek(uint64_t virt, uint64_t *out)
 	return true;
 }
 
-bool vmm_map(uint64_t virt, uint64_t phys, uint64_t flags)
+static bool vmm_map_locked(uint64_t virt, uint64_t phys, uint64_t flags)
 {
 	uint64_t pml4i = (virt >> 39U) & INDEX_MASK;
 	uint64_t pdpti = (virt >> 30U) & INDEX_MASK;
@@ -300,25 +320,49 @@ bool vmm_map(uint64_t virt, uint64_t phys, uint64_t flags)
 	return true;
 }
 
+bool vmm_map(uint64_t virt, uint64_t phys, uint64_t flags)
+{
+	uint64_t f = spinlock_acquire_irqsave(&vmm_lock);
+	bool ok = vmm_map_locked(virt, phys, flags);
+	spinlock_release_irqrestore(&vmm_lock, f);
+	/* A new mapping only ever replaces a not-present entry here, so no other
+	   CPU can hold a stale TLB entry for it. */
+	return ok;
+}
+
 bool vmm_unmap(uint64_t virt)
 {
+	uint64_t f = spinlock_acquire_irqsave(&vmm_lock);
 	uint64_t *pte = pte_for(virt);
 	if (pte == NULL || (*pte & PAGE_PRESENT) == 0) {
+		spinlock_release_irqrestore(&vmm_lock, f);
 		return false;
 	}
 	*pte = 0;
 	invlpg(virt);
+	spinlock_release_irqrestore(&vmm_lock, f);
+	/* Kernel-half address: every CPU shares these tables, so every CPU may hold
+	   a stale entry.  Must happen after the PTE is cleared and the lock is
+	   dropped -- the IPI handler does not need the lock, but the target CPUs
+	   must not observe the old PTE. */
+	tlb_shootdown_page(virt);
 	return true;
 }
 
 bool vmm_protect(uint64_t virt, uint64_t flags)
 {
+	uint64_t f = spinlock_acquire_irqsave(&vmm_lock);
 	uint64_t *pte = pte_for(virt);
 	if (pte == NULL || (*pte & PAGE_PRESENT) == 0) {
+		spinlock_release_irqrestore(&vmm_lock, f);
 		return false;
 	}
 	*pte = (*pte & PAGE_MASK) | flags | PAGE_PRESENT;
 	invlpg(virt);
+	spinlock_release_irqrestore(&vmm_lock, f);
+	/* Narrowing permissions must be visible everywhere immediately, or another
+	   CPU keeps writing through a cached writable entry. */
+	tlb_shootdown_page(virt);
 	return true;
 }
 
@@ -345,8 +389,13 @@ static uint64_t *ensure_table_in(uint64_t *table, uint64_t index, uint64_t extra
 
 uint64_t vmm_space_create(void)
 {
+	/* Reads the kernel half of the live PML4, which vmm_map may be extending on
+	   another CPU: without the lock a new address space could capture a
+	   half-installed entry. */
+	uint64_t f = spinlock_acquire_irqsave(&vmm_lock);
 	uint64_t pml4_page = pmm_alloc_page();
 	if (pml4_page == PMM_ALLOC_FAILED) {
+		spinlock_release_irqrestore(&vmm_lock, f);
 		return 0;
 	}
 
@@ -357,11 +406,19 @@ uint64_t vmm_space_create(void)
 	memset(new_pml4, 0, 256U * sizeof(uint64_t));
 	memcpy(&new_pml4[256], &kern_pml4[256], 256U * sizeof(uint64_t));
 
+	spinlock_release_irqrestore(&vmm_lock, f);
 	return pml4_page;
 }
 
+/* No TLB shootdown here, and none is needed: a process has exactly one thread,
+   so only one CPU ever loaded this CR3, and schedule() switches that CPU away
+   from it before handing the space to the reaper.  Writing CR3 flushes every
+   non-global entry for the old space on that CPU, so no stale translation to
+   these pages can survive anywhere.  Revisit if a process ever gains a second
+   thread. */
 void vmm_space_destroy(uint64_t pml4_phys)
 {
+	uint64_t lockf = spinlock_acquire_irqsave(&vmm_lock);
 	if (pml4_phys == 0 || pml4_phys == active_pml4_phys) {
 		return;
 	}
@@ -410,9 +467,11 @@ void vmm_space_destroy(uint64_t pml4_phys)
 		pmm_free_page(pdpt_phys);
 	}
 	pmm_free_page(pml4_phys);
+	spinlock_release_irqrestore(&vmm_lock, lockf);
 }
 
-bool vmm_space_map(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags)
+static bool vmm_space_map_locked(uint64_t pml4_phys, uint64_t virt,
+				 uint64_t phys, uint64_t flags)
 {
 	uint64_t pml4i = (virt >> 39U) & INDEX_MASK;
 	uint64_t pdpti = (virt >> 30U) & INDEX_MASK;
@@ -446,6 +505,17 @@ bool vmm_space_map(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t fl
 
 	pt[pti] = (phys & PAGE_MASK) | flags | PAGE_PRESENT;
 	return true;
+}
+
+bool vmm_space_map(uint64_t pml4_phys, uint64_t virt, uint64_t phys, uint64_t flags)
+{
+	uint64_t f = spinlock_acquire_irqsave(&vmm_lock);
+	bool ok = vmm_space_map_locked(pml4_phys, virt, phys, flags);
+	spinlock_release_irqrestore(&vmm_lock, f);
+	/* No shootdown: this only ever populates a user-half entry of an address
+	   space that is not yet running anywhere (elf_load builds it before the
+	   thread is queued), so no CPU can hold a stale translation for it. */
+	return ok;
 }
 
 void vmm_space_switch(uint64_t pml4_phys)

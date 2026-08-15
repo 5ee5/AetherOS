@@ -54,6 +54,19 @@ void idt_install_gate(uint8_t vector, void (*handler)(void), uint8_t ist)
 	idt[vector].ist = ist;
 }
 
+/* The IDT itself is shared -- every CPU wants the same handlers -- but IDTR is a
+   per-CPU register, so each CPU must execute its own lidt.  An AP that skipped
+   this ran with the IDTR left by INIT (base 0, limit 0xffff), so the first
+   interrupt or exception on that core would have been fatal. */
+void x86_64_idt_load(void)
+{
+	struct idtr idtr = {
+		.limit = sizeof(idt) - 1U,
+		.base = (uint64_t)(uintptr_t)idt,
+	};
+	lidt(&idtr);
+}
+
 void x86_64_idt_init(void)
 {
 	for (uint8_t vector = 0; vector < 32U; ++vector) {
@@ -61,11 +74,7 @@ void x86_64_idt_init(void)
 	}
 	idt[8].ist = 1;  /* #DF uses IST1 so a corrupt RSP doesn't triple-fault */
 
-	struct idtr idtr = {
-		.limit = sizeof(idt) - 1U,
-		.base = (uint64_t)(uintptr_t)idt,
-	};
-	lidt(&idtr);
+	x86_64_idt_load();
 }
 
 static uint64_t read_cr2(void)
