@@ -66,6 +66,12 @@ if [ -f "build/disk.img" ]; then
 	fi
 fi
 
+# The kernel never exits: it boots, runs its self-tests and idles at a login
+# prompt.  Waiting for `timeout` to fire therefore cost the FULL budget on every
+# run, on every leg -- so raising a timeout to cover a slow path made CI slower
+# even when everything passed.  Instead, run QEMU in the background, watch the
+# log for the markers that mean the boot got where it needed to, and stop it
+# once they appear.  `timeout` stays as the backstop for a boot that hangs.
 set +e
 # shellcheck disable=SC2086
 timeout "${BOOT_TEST_TIMEOUT:-60s}" qemu-system-x86_64 \
@@ -80,8 +86,39 @@ timeout "${BOOT_TEST_TIMEOUT:-60s}" qemu-system-x86_64 \
 	-serial stdio \
 	-display none \
 	-no-reboot \
-	-no-shutdown >"$LOG" 2>&1
+	-no-shutdown >"$LOG" 2>&1 &
+QEMU_WAIT_PID=$!
+
+# Everything the assertions below need to have been printed.
+done_when() {
+	grep -q "kernel: initialization complete" "$LOG" 2>/dev/null || return 1
+	grep -qE "^ktest: [0-9]+ run, [0-9]+ failed" "$LOG" 2>/dev/null || return 1
+	if [ "${BOOT_TEST_USB:-0}" = "1" ]; then
+		grep -q "vfs: mounted ext2 root on usb" "$LOG" 2>/dev/null || return 1
+		grep -q "usb-hid: keyboard ready" "$LOG" 2>/dev/null || return 1
+	fi
+	return 0
+}
+
+while kill -0 "$QEMU_WAIT_PID" 2>/dev/null; do
+	if done_when; then
+		# Keep running briefly: a fault on the post-init path (the login/shell
+		# handoff) is exactly what the old assertions could not see, and killing
+		# the instant the markers land would reintroduce that blind spot.
+		sleep "${BOOT_TEST_GRACE:-5}"
+		kill "$QEMU_WAIT_PID" 2>/dev/null
+		break
+	fi
+	sleep 1
+done
+
+wait "$QEMU_WAIT_PID"
 status=$?
+# 143 = SIGTERM from the early stop above, and 124 = the timeout backstop; both
+# are normal endings for a kernel that never exits on its own.
+if [ "$status" -eq 143 ]; then
+	status=0
+fi
 set -e
 
 fail() {
