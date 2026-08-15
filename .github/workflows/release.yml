@@ -16,6 +16,7 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -82,13 +83,28 @@ jobs:
           fi
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential nasm binutils xorriso mtools
+        # parted/e2fsprogs are needed by make usb and were previously relied on
+        # implicitly; qemu + ovmf are needed to boot-test what we are about to
+        # publish.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential nasm binutils \
+            xorriso mtools \
+            parted e2fsprogs \
+            qemu-system-x86 ovmf
 
       - name: Build ESP tree
         run: make all
 
-      - name: Install mtools for USB image
-        run: sudo apt-get install -y mtools
+      - name: Test before publishing
+        # Every published image used to be untested: this workflow triggers on
+        # push in parallel with CI, so a red CI never blocked a release.  Gate
+        # the release on the same checks CI runs.
+        run: |
+          BOOT_TEST_TIMEOUT=45s make test
+          BOOT_TEST_USB=1 BOOT_TEST_TIMEOUT=45s make boot-test
+          make userland-test
 
       - name: Build USB image
         run: make usb
@@ -101,6 +117,14 @@ jobs:
           cp build/kernel/kernel.elf dist/aetheros-${TAG}-kernel.elf
           cp build/BOOTX64.EFI dist/aetheros-${TAG}-BOOTX64.EFI
           gzip -c build/usb.img > dist/aetheros-${TAG}-usb.img.gz
+
+      - name: Generate checksums
+        # Users are told to dd these images to a disk; give them something to
+        # verify against.
+        run: |
+          cd dist
+          sha256sum aetheros-* > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Build release notes
         run: |
@@ -130,6 +154,9 @@ jobs:
             echo "- \`aetheros-${TAG}-kernel.elf\` — kernel ELF (higher-half, loaded by bootloader)"
             echo "- \`aetheros-${TAG}-BOOTX64.EFI\` — UEFI bootloader application"
             echo "- \`aetheros-${TAG}-usb.img.gz\` — bootable USB image (write with \`dd\` or \`make flash\`)"
+            echo "- \`SHA256SUMS\` — checksums for the files above"
+            echo ""
+            echo "> All artifacts were boot-tested (AHCI + USB/xHCI) and the userland session test passed before publishing."
           } > dist/notes.md
 
       - name: Create release
@@ -143,4 +170,5 @@ jobs:
             dist/aetheros-${TAG}-esp.tar.gz \
             dist/aetheros-${TAG}-kernel.elf \
             dist/aetheros-${TAG}-BOOTX64.EFI \
-            dist/aetheros-${TAG}-usb.img.gz
+            dist/aetheros-${TAG}-usb.img.gz \
+            dist/SHA256SUMS

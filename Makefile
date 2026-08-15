@@ -140,7 +140,7 @@ KERNEL_OBJS := $(KERNEL_C_SRCS:%.c=$(BUILD_DIR)/%.o) \
 	$(KERNEL_ASM_SRCS:%.asm=$(BUILD_DIR)/%.o)
 BOOT_OBJS := $(BOOT_C_SRCS:%.c=$(BUILD_DIR)/%.o)
 
-.PHONY: all clean esp iso disk usb flash check-deps run-qemu test boot-test userlibc mkpasswd stdio-selftest
+.PHONY: all clean esp iso disk usb flash check-deps run-qemu test boot-test userland-test userlibc mkpasswd stdio-selftest
 
 all: esp
 
@@ -291,6 +291,11 @@ iso: esp
 
 boot-test: iso disk
 	./scripts/test-boot-qemu.sh
+
+# Drives a real login session over the serial console and runs /bin programs.
+# The boot test only proves the kernel comes up; this proves userland works.
+userland-test: iso disk
+	./scripts/test-userland-qemu.sh
 
 test: boot-test
 

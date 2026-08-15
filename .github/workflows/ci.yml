@@ -4,20 +4,54 @@ on:
   push:
   pull_request:
 
+# A hung job would otherwise burn the full 6-hour default.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential nasm binutils qemu-system-x86 ovmf xorriso mtools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential nasm binutils \
+            qemu-system-x86 ovmf \
+            xorriso mtools \
+            parted e2fsprogs
+
       - name: Check dependencies
         run: ./scripts/check-deps.sh
+
       - name: Build
         run: make all
+
       - name: Boot smoke test (AHCI)
         run: BOOT_TEST_TIMEOUT=45s make test
+
       - name: Boot smoke test (USB / xHCI)
         # Attaches the data disk only over USB, forcing the root mount through
         # the xHCI + Bulk-Only Transport + SCSI stack (asserts the USB mount).
         run: BOOT_TEST_USB=1 BOOT_TEST_TIMEOUT=45s make boot-test
+
+      - name: Userland test (login + /bin programs)
+        # Drives a real login session over the serial console.  Until this
+        # existed, CI never ran a single user program -- /bin/find was broken
+        # for the whole life of the project while CI stayed green.
+        run: make userland-test
+
+      - name: Upload serial logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-logs
+          path: build/*.log
+          if-no-files-found: ignore

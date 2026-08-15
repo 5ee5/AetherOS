@@ -45,6 +45,15 @@ fi
 LOG="${BOOT_TEST_LOG:-build/qemu-boot.log}"
 mkdir -p "$(dirname "$LOG")"
 
+# Without a data disk the kernel falls back to the embedded shell blob and every
+# assertion below still passes -- an ext2/AHCI regression would go green.  Demand
+# the image unless the caller deliberately opts out.
+if [ ! -f "build/disk.img" ] && [ "${BOOT_TEST_ALLOW_NO_DISK:-0}" != "1" ]; then
+	echo "build/disk.img not found; run make disk first" \
+	     "(set BOOT_TEST_ALLOW_NO_DISK=1 to test without it)" >&2
+	exit 1
+fi
+
 DISK_ARGS=""
 if [ -f "build/disk.img" ]; then
 	if [ "${BOOT_TEST_USB:-0}" = "1" ]; then
@@ -75,40 +84,78 @@ timeout "${BOOT_TEST_TIMEOUT:-60s}" qemu-system-x86_64 \
 status=$?
 set -e
 
-if ! grep -q "kernel: initialization complete" "$LOG"; then
+fail() {
 	cat "$LOG"
-	echo "boot smoke test failed: kernel did not reach initialization complete" >&2
+	echo "boot smoke test failed: $1" >&2
 	exit 1
+}
+
+# The kernel idles forever under -no-reboot -no-shutdown, so `timeout` killing
+# QEMU (124) is the normal, successful outcome.  Any other non-zero status means
+# QEMU itself failed to start or died -- previously this was captured and never
+# looked at, so a QEMU crash and a clean run were indistinguishable.
+if [ "$status" -ne 124 ] && [ "$status" -ne 0 ]; then
+	fail "qemu exited with status $status"
+fi
+
+if ! grep -q "kernel: initialization complete" "$LOG"; then
+	fail "kernel did not reach initialization complete"
+fi
+
+# Nothing may fault, at any point -- including AFTER init completes, on the
+# login/shell path.  The kernel prints none of these on a healthy boot, so any
+# occurrence is a real failure.  Audit finding H23 (2026-08-11) was exactly such
+# a post-init user fault, and the old assertions could not see it.
+if grep -inE "panic|segfault|exception vector|triple fault|unhandled" "$LOG" >/dev/null; then
+	grep -inE "panic|segfault|exception vector|triple fault|unhandled" "$LOG" >&2
+	fail "a fault or panic appeared in the boot log"
 fi
 
 if grep -q "ktest: FAIL" "$LOG"; then
-	cat "$LOG"
-	echo "boot smoke test failed: kernel self-tests reported failures" >&2
-	exit 1
+	fail "kernel self-tests reported failures"
 fi
 
-if ! grep -q "ktest:" "$LOG"; then
-	cat "$LOG"
-	echo "boot smoke test failed: no ktest output found" >&2
-	exit 1
+# Assert the summary line and the actual count, not merely that "ktest:" appeared
+# somewhere.  A run that silently executed 3 assertions instead of ~8500 used to
+# pass this test just as readily as a full one.
+# tr -d '\r': this is serial output, so every line carries a trailing CR that
+# would defeat a '$'-anchored match.
+KTEST_LINE="$(tr -d '\r' <"$LOG" | grep -E "^ktest: [0-9]+ run, [0-9]+ failed$" | tail -1)"
+if [ -z "$KTEST_LINE" ]; then
+	fail "no ktest summary line found"
+fi
+
+KTEST_RUN="$(printf '%s' "$KTEST_LINE" | sed -E 's/^ktest: ([0-9]+) run.*/\1/')"
+KTEST_FAILED="$(printf '%s' "$KTEST_LINE" | sed -E 's/^.*, ([0-9]+) failed$/\1/')"
+MIN_KTESTS="${BOOT_TEST_MIN_KTESTS:-8000}"
+
+# Guard the extraction itself: a [ comparison against a non-integer is not fatal
+# inside an `if`, even under set -e, so a silently failed parse would otherwise
+# read as "no failures".
+case "$KTEST_RUN$KTEST_FAILED" in
+	''|*[!0-9]*) fail "could not parse ktest summary: '$KTEST_LINE'" ;;
+esac
+
+if [ "$KTEST_FAILED" -ne 0 ]; then
+	fail "$KTEST_FAILED ktest assertions failed"
+fi
+
+if [ "$KTEST_RUN" -lt "$MIN_KTESTS" ]; then
+	fail "only $KTEST_RUN ktest assertions ran (expected at least $MIN_KTESTS)"
 fi
 
 # In USB mode the data disk is attached ONLY over USB, so the root must have
 # been mounted through the xHCI/BOT/SCSI stack — otherwise it silently fell
 # back to the embedded shell and the test would be meaningless.
 if [ "${BOOT_TEST_USB:-0}" = "1" ] && ! grep -q "vfs: mounted ext2 root on usb" "$LOG"; then
-	cat "$LOG"
-	echo "boot smoke test failed: USB root was not mounted via the USB stack" >&2
-	exit 1
+	fail "USB root was not mounted via the USB stack"
 fi
 
 # USB mode also attaches a USB HID keyboard: assert it enumerated alongside the
 # storage device (proves multi-device xHCI + the HID driver).
 if [ "${BOOT_TEST_USB:-0}" = "1" ] && ! grep -q "usb-hid: keyboard ready" "$LOG"; then
-	cat "$LOG"
-	echo "boot smoke test failed: USB HID keyboard did not enumerate" >&2
-	exit 1
+	fail "USB HID keyboard did not enumerate"
 fi
 
-echo "boot smoke test passed"
+echo "boot smoke test passed ($KTEST_RUN ktest assertions, 0 failed)"
 exit 0
