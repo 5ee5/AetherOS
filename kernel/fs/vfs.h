@@ -51,6 +51,12 @@ int vfs_chdir(const char *path);
 /* Get working directory for the current process into `buf`. */
 int vfs_getcwd(char *buf, uint32_t size);
 
+/* Stat an open descriptor's inode: mode/uid/gid and, optionally, size.  Use
+   this instead of a second path lookup when a decision must apply to the exact
+   file already opened (see the setuid path in spawn_process). */
+int vfs_fstat(int fd, uint16_t *out_mode, uint32_t *out_uid, uint32_t *out_gid,
+              uint64_t *out_size);
+
 /* Return the mode, owner uid, and owner gid of a file. Returns 0 on success, -1 on error. */
 int vfs_file_stat(const char *path, uint16_t *out_mode, uint32_t *out_uid, uint32_t *out_gid);
 

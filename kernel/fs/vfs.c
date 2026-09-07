@@ -561,6 +561,27 @@ int vfs_getcwd(char *buf, uint32_t size)
     return 0;
 }
 
+/* Stat the inode an *open descriptor* refers to, rather than re-resolving a
+   path.  spawn_process needs this: it used to stat the path once to check
+   execute permission, open and read the image, then stat the path *again* to
+   decide whether to grant euid = fuid.  Each lookup took and dropped vfs_lock
+   independently, so anyone able to write the containing directory could swap
+   the binary between the read and the final stat -- and the kernel would run
+   their image while granting root from the original file's inode.  Deciding
+   from the descriptor ties the credentials to the bytes actually loaded. */
+int vfs_fstat(int fd, uint16_t *out_mode, uint32_t *out_uid, uint32_t *out_gid,
+              uint64_t *out_size)
+{
+    VFS_LOCK();
+    if (!s_root_fs) return -1;
+    if (fd < 0 || fd >= VFS_MAX_OPEN || !s_files[fd].in_use) return -1;
+
+    uint32_t ino = s_files[fd].inode;
+    if (!ext2_inode_stat(s_root_fs, ino, out_mode, out_uid, out_gid)) return -1;
+    if (out_size) *out_size = ext2_file_size(s_root_fs, ino);
+    return 0;
+}
+
 int vfs_file_stat(const char *path, uint16_t *out_mode, uint32_t *out_uid, uint32_t *out_gid)
 {
     VFS_LOCK();

@@ -548,23 +548,37 @@ static int64_t spawn_process(uint64_t path_virt, uint64_t argv_virt,
         return -14;
     const char *path = kern_path;
 
+    /* Open FIRST, then take every decision from that one descriptor.
+     *
+     * This used to resolve `path` four separate times -- stat for execute
+     * permission, stat for size, open to read, and stat *again* to decide
+     * whether to grant euid = fuid -- each taking and dropping vfs_lock on its
+     * own.  Anyone able to write the containing directory could therefore swap
+     * the binary between the read and that final stat, and the kernel would
+     * execute their image while granting root from the original file's inode.
+     * One open plus vfs_fstat binds the permission check, the size, the bytes
+     * loaded and the credentials to the same inode. */
+    int vfd = vfs_open(path);
+    if (vfd < 0) return -2;
+
+    uint16_t fmode = 0; uint32_t fuid = 0, fgid = 0; uint64_t fsize = 0;
+    if (vfs_fstat(vfd, &fmode, &fuid, &fgid, &fsize) != 0) {
+        vfs_close(vfd);
+        return -2;
+    }
+
     /* Check execute permission before loading. */
     {
         struct process *cp = sched_current_process();
-        if (cp) {
-            uint16_t fmode = 0; uint32_t fuid = 0, fgid = 0;
-            if (vfs_file_stat(path, &fmode, &fuid, &fgid) == 0 &&
-                !cred_check(&cp->cred, fuid, fgid, fmode, 1u))
-                return -13; /* EACCES */
+        if (cp && !cred_check(&cp->cred, fuid, fgid, fmode, 1u)) {
+            vfs_close(vfd);
+            return -13; /* EACCES */
         }
     }
 
-    uint64_t fsize = vfs_file_size(path);
-    if (fsize == UINT64_MAX || fsize == 0 || fsize > 4U * 1024U * 1024U) return -2;
+    if (fsize == 0 || fsize > 4U * 1024U * 1024U) { vfs_close(vfd); return -2; }
     void *buf = kmalloc((uint32_t)fsize);
-    if (!buf) return -12;
-    int vfd = vfs_open(path);
-    if (vfd < 0) { kfree(buf); return -2; }
+    if (!buf) { vfs_close(vfd); return -12; }
     int64_t nread = vfs_read(vfd, buf, (uint32_t)fsize);
     vfs_close(vfd);
     /* A short read (I/O error, or the file shrank between the size query and the
@@ -675,8 +689,10 @@ static int64_t spawn_process(uint64_t path_virt, uint64_t argv_virt,
 
     /* Setuid: if the executable's inode has the setuid bit (04000), elevate euid. */
     {
-        uint16_t fmode = 0; uint32_t fuid = 0, fgid = 0;
-        if (vfs_file_stat(path, &fmode, &fuid, &fgid) == 0 && (fmode & 04000U)) {
+        /* fmode/fuid/fgid come from vfs_fstat on the descriptor the image was
+           actually read from -- not from a fresh lookup of `path`, which is
+           what made this swappable. */
+        if (fmode & 04000U) {
             proc->cred.euid = fuid;
             if (fuid == 0) proc->cred.egid = 0;
         }
