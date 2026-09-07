@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 
+#include "arch/x86_64/apic.h"
 #include "core/serial.h"
 #include "fs/vfs.h"
 #include "sched/sched.h"
@@ -14,6 +15,10 @@
 
 #define VFS_STRESS_THREADS 3
 #define VFS_STRESS_ROUNDS  10
+
+/* Generous next to the ~30 small reads the workers actually perform, but bounded
+   so a genuinely stuck worker fails the assertion instead of hanging the boot. */
+#define VFS_STRESS_TIMEOUT_MS 10000U
 
 /* Per-thread slots rather than shared counters: a plain ++ from several CPUs
    loses updates, and the test would then fail for its own reasons. */
@@ -48,12 +53,20 @@ static void test_vfs_concurrency(void)
         thread_create(vfs_stress_thread, (void *)(uintptr_t)i);
     }
 
-    /* Yield rather than spin: with one CPU the workers only run once this
-       thread gives the scheduler a chance, and int $SCHED_YIELD_VECTOR works with IF clear.
-       The bound is ~10x what the work needs, so a stuck waiter fails the
-       assertion below instead of hanging the boot until the test times out. */
+    /* Yield rather than spin: the workers only run once this thread gives the
+       scheduler a chance, and int $SCHED_YIELD_VECTOR works with IF clear.
+
+       The bound is wall-clock, not a yield count.  A count worked only while
+       one CPU ran everything, so each yield handed a worker a turn and 100000
+       yields meant 100000 turns of progress.  With the APs actually running
+       threads, the workers make progress on another CPU doing real disk I/O
+       while this thread burns its whole budget yielding against itself -- so
+       the count stopped tracking progress at all and the assertion failed
+       intermittently on a slow host.  Time is what we actually mean. */
     int finished = 0;
-    for (int spins = 0; spins < 100000 && finished < VFS_STRESS_THREADS; ++spins) {
+    uint64_t per_ms   = apic_tsc_per_ms();
+    uint64_t deadline = apic_now_tsc() + per_ms * VFS_STRESS_TIMEOUT_MS;
+    while (finished < VFS_STRESS_THREADS && apic_now_tsc() < deadline) {
         SCHED_YIELD();
         finished = 0;
         for (int i = 0; i < VFS_STRESS_THREADS; ++i) finished += s_stress_done[i];

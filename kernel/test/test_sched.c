@@ -16,6 +16,19 @@
 
 /* ---- Basic thread completion test ------------------------------------- */
 
+/* Every wait in this suite is bounded on the wall clock.  They used to be bare
+   `while (cond) yield;` spins, so a condition that never came true hung the boot
+   forever and CI reported only a 60-second timeout with no clue which of a dozen
+   waits was stuck.  Bounded, the same hiccup fails a named assertion instead. */
+#define KTEST_WAIT_MS(cond, ms) do {                                           \
+	uint64_t _dl = apic_now_tsc() + apic_tsc_per_ms() * (uint64_t)(ms);    \
+	while (!(cond) && apic_now_tsc() < _dl) {                              \
+		thread_yield();                                                \
+	}                                                                      \
+} while (0)
+
+#define KTEST_WAIT_WW 5000U   /* generous: these tests need milliseconds */
+
 #define NUM_THREADS 4
 
 static volatile uint32_t completion_count;
@@ -131,6 +144,7 @@ static void defer_victim(void *arg)
 
 #define SMP_PROBE_THREADS 4
 #define SMP_PROBE_ITERS   64
+#define SMP_PROBE_TIMEOUT_MS 5000U
 
 static volatile uint32_t s_smp_seen[MAX_CPUS];
 static volatile uint32_t s_smp_distinct;
@@ -179,9 +193,13 @@ static void test_smp_threads_run_on_all_cpus(void)
 		KTEST_ASSERT(thread_create(smp_probe_thread, NULL) != NULL);
 	}
 
-	for (int spins = 0; spins < 200000 &&
-	     __atomic_load_n(&s_smp_finished, __ATOMIC_SEQ_CST) < SMP_PROBE_THREADS;
-	     ++spins) {
+	/* Wall-clock bound, not a yield count: with more than one CPU actually
+	   running threads, this thread can burn any fixed number of yields against
+	   itself while the probes make progress elsewhere, so a count says nothing
+	   about how much work has happened. */
+	uint64_t deadline = apic_now_tsc() + apic_tsc_per_ms() * SMP_PROBE_TIMEOUT_MS;
+	while (__atomic_load_n(&s_smp_finished, __ATOMIC_SEQ_CST) < SMP_PROBE_THREADS
+	       && apic_now_tsc() < deadline) {
 		thread_yield();
 	}
 	KTEST_ASSERT(__atomic_load_n(&s_smp_finished, __ATOMIC_SEQ_CST) ==
@@ -223,10 +241,8 @@ void test_sched_run(void)
 	/* Enable interrupts so the APIC timer can drive scheduling. */
 	__asm__ volatile("sti" ::: "memory");
 
-	/* Spin until all threads have exited. */
-	while (completion_count < NUM_THREADS) {
-		__asm__ volatile("pause");
-	}
+	/* Wait until all threads have exited. */
+	KTEST_WAIT_MS(completion_count >= NUM_THREADS, KTEST_WAIT_WW);
 
 	__asm__ volatile("cli" ::: "memory");
 	KTEST_ASSERT(completion_count == NUM_THREADS);
@@ -239,9 +255,7 @@ void test_sched_run(void)
 	thread_create(mutex_thread, NULL);
 
 	/* Yield this thread so the mutex threads can run. */
-	while (mutex_counter < 20U) {
-		thread_yield();
-	}
+	KTEST_WAIT_MS(mutex_counter >= 20U, KTEST_WAIT_WW);
 	__asm__ volatile("cli" ::: "memory");
 	KTEST_ASSERT(mutex_counter == 20U);
 
@@ -252,9 +266,7 @@ void test_sched_run(void)
 	thread_create(yield_thread, (void *)(uintptr_t)5U);
 	thread_create(yield_thread, (void *)(uintptr_t)5U);
 
-	while (yield_counter < 10U) {
-		thread_yield();
-	}
+	KTEST_WAIT_MS(yield_counter >= 10U, KTEST_WAIT_WW);
 	__asm__ volatile("cli" ::: "memory");
 	KTEST_ASSERT(yield_counter == 10U);
 
@@ -270,9 +282,7 @@ void test_sched_run(void)
 	for (uint32_t i = 0; i < HEAP_STRESS_THREADS; ++i) {
 		thread_create(heap_stress_thread, NULL);
 	}
-	while (heap_stress_done < HEAP_STRESS_THREADS) {
-		thread_yield();
-	}
+	KTEST_WAIT_MS(heap_stress_done >= HEAP_STRESS_THREADS, KTEST_WAIT_WW);
 	__asm__ volatile("cli" ::: "memory");
 	KTEST_ASSERT(heap_stress_done == HEAP_STRESS_THREADS);
 	KTEST_ASSERT(heap_stress_bad == 0U);
@@ -284,9 +294,7 @@ void test_sched_run(void)
 	__asm__ volatile("sti" ::: "memory");
 	struct thread *victim = thread_create(sleeper_victim, NULL);
 	KTEST_ASSERT(victim != NULL);
-	while (!sleeper_started) {
-		thread_yield();
-	}
+	KTEST_WAIT_MS(sleeper_started, KTEST_WAIT_WW);
 	/* Let it reach sched_sleep_ms and land on the sleep list. */
 	for (uint32_t i = 0; i < 8U; ++i) {
 		thread_yield();
@@ -324,18 +332,14 @@ void test_sched_run(void)
 	__asm__ volatile("sti" ::: "memory");
 	struct thread *holder = thread_create(defer_victim, NULL);
 	KTEST_ASSERT(holder != NULL);
-	while (!defer_ready) {
-		thread_yield();
-	}
+	KTEST_WAIT_MS(defer_ready, KTEST_WAIT_WW);
 	/* The victim is holding defer_mutex at this point. */
 	KTEST_ASSERT(sched_kill(holder) == false);   /* deferred */
 	KTEST_ASSERT(holder->kill_pending);
 	KTEST_ASSERT(holder->state != THREAD_DEAD);  /* still alive to unlock */
 
 	defer_release = 1U;
-	while (!defer_done) {
-		thread_yield();
-	}
+	KTEST_WAIT_MS(defer_done, KTEST_WAIT_WW);
 	__asm__ volatile("cli" ::: "memory");
 	/* It released the mutex on its way out, so the lock is usable again — this is
 	   the assertion the filesystem wedge would have failed. */
