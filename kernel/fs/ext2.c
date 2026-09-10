@@ -167,6 +167,9 @@ static bool read_inode(ext2_fs_t *fs, uint32_t ino, ext2_inode_t *out)
     return true;
 }
 
+/* Defined below, next to the block-freeing walkers it mirrors. */
+static uint32_t count_inode_blocks(ext2_fs_t *fs, const ext2_inode_t *inode);
+
 /* ---- Write helpers -------------------------------------------------------- */
 
 #define EXT2_IMODE_REG  0x8000U
@@ -435,6 +438,97 @@ static bool path_split(const char *path, char *parent, char *name)
     return true;
 }
 
+/* ---- Directory block layout ----------------------------------------------
+   Directories may span more than the twelve direct blocks.  These three
+   helpers are the only code that knows how a directory's blocks are laid out;
+   every walker below iterates by index through them instead of reaching into
+   i_block[] directly.  Reaching in directly is what capped a directory at 12
+   blocks -- about 12 KiB, or roughly 300-500 entries.  Past that limit
+   dir_add_entry freed the block it had just allocated and returned false, and
+   lookup and listing could not see anything beyond the twelfth block, so files
+   appeared to be created and then were simply invisible. */
+
+static uint32_t dir_block_count(ext2_fs_t *fs, const ext2_inode_t *dir)
+{
+    uint32_t n = 0;
+    for (int b = 0; b < 12; b++) {
+        if (!dir->i_block[b]) return n;
+        n++;
+    }
+    if (!dir->i_block[12]) return n;
+
+    uint8_t *ind = kmalloc(fs->block_size);
+    if (!ind) return n;
+    if (read_block(fs, dir->i_block[12], ind)) {
+        uint32_t ptrs = fs->block_size / 4;
+        for (uint32_t i = 0; i < ptrs; i++) {
+            if (!((uint32_t *)ind)[i]) break;
+            n++;
+        }
+    }
+    kfree(ind);
+    return n;
+}
+
+/* Physical block behind the idx'th block of a directory, or 0 if absent. */
+static uint32_t dir_block_at(ext2_fs_t *fs, const ext2_inode_t *dir, uint32_t idx)
+{
+    if (idx < 12) return dir->i_block[idx];
+
+    uint32_t ptrs = fs->block_size / 4;
+    uint32_t i = idx - 12U;
+    if (i >= ptrs || !dir->i_block[12]) return 0;
+
+    uint8_t *ind = kmalloc(fs->block_size);
+    if (!ind) return 0;
+    uint32_t bno = 0;
+    if (read_block(fs, dir->i_block[12], ind)) bno = ((uint32_t *)ind)[i];
+    kfree(ind);
+    return bno;
+}
+
+/* Attach `bno` as the directory's next block, allocating the indirect block on
+   the transition past the twelfth.  Does not write the inode; the caller does. */
+static bool dir_block_append(ext2_fs_t *fs, ext2_inode_t *dir, uint32_t bno)
+{
+    for (int b = 0; b < 12; b++) {
+        if (dir->i_block[b] == 0) {
+            dir->i_block[b] = bno;
+            return true;
+        }
+    }
+
+    bool fresh = false;
+    if (dir->i_block[12] == 0) {
+        uint32_t ind_bno = alloc_block(fs);
+        if (!ind_bno) return false;
+        dir->i_block[12] = ind_bno;
+        fresh = true;
+    }
+
+    uint8_t *ind = kmalloc(fs->block_size);
+    if (!ind) return false;
+
+    if (fresh) {
+        memset(ind, 0, fs->block_size);
+    } else if (!read_block(fs, dir->i_block[12], ind)) {
+        kfree(ind);
+        return false;
+    }
+
+    bool ok = false;
+    uint32_t ptrs = fs->block_size / 4;
+    for (uint32_t i = 0; i < ptrs; i++) {
+        if (((uint32_t *)ind)[i] == 0) {
+            ((uint32_t *)ind)[i] = bno;
+            ok = write_block(fs, dir->i_block[12], ind);
+            break;
+        }
+    }
+    kfree(ind);
+    return ok;
+}
+
 /* Validate an on-disk directory entry at p within a block ending at end.
    Guards against a corrupt or hostile filesystem: the 8-byte header must fit,
    rec_len must be large enough to hold the (4-byte aligned) name, and must not
@@ -464,8 +558,9 @@ static bool dir_add_entry(ext2_fs_t *fs, uint32_t dir_ino,
     if (!blk) return false;
 
     /* Search existing blocks for slack space. */
-    for (int b = 0; b < 12; b++) {
-        uint32_t bno = dir_inode.i_block[b];
+    uint32_t nblocks = dir_block_count(fs, &dir_inode);
+    for (uint32_t b = 0; b < nblocks; b++) {
+        uint32_t bno = dir_block_at(fs, &dir_inode, b);
         if (bno == 0) break;
         if (!read_block(fs, bno, blk)) continue;
 
@@ -521,18 +616,19 @@ static bool dir_add_entry(ext2_fs_t *fs, uint32_t dir_ino,
     write_block(fs, new_bno, blk);
     kfree(blk);
 
-    /* Attach new block to the directory inode. */
-    for (int b = 0; b < 12; b++) {
-        if (dir_inode.i_block[b] == 0) {
-            dir_inode.i_block[b] = new_bno;
-            dir_inode.i_size    += fs->block_size;
-            dir_inode.i_blocks  += fs->block_size / 512;
-            write_inode(fs, dir_ino, &dir_inode);
-            return true;
-        }
+    /* Attach new block to the directory inode.  dir_block_append grows into the
+       indirect block once the twelve direct slots are used. */
+    if (!dir_block_append(fs, &dir_inode, new_bno)) {
+        free_block(fs, new_bno);
+        return false;
     }
-    free_block(fs, new_bno);
-    return false;
+    dir_inode.i_size += fs->block_size;
+    /* Recomputed rather than incremented: appending may also have allocated the
+       indirect block, which counts toward i_blocks too. */
+    dir_inode.i_blocks = count_inode_blocks(fs, &dir_inode) *
+                         (fs->block_size / 512);
+    write_inode(fs, dir_ino, &dir_inode);
+    return true;
 }
 
 /* Remove a directory entry by name.  Sets inode=0 (soft delete). */
@@ -544,8 +640,9 @@ static bool dir_is_empty(ext2_fs_t *fs, const ext2_inode_t *dir_inode)
     if (!blk) return false;
 
     bool empty = true;
-    for (int b = 0; b < 12 && empty; b++) {
-        uint32_t bno = dir_inode->i_block[b];
+    uint32_t nblocks = dir_block_count(fs, dir_inode);
+    for (uint32_t b = 0; b < nblocks && empty; b++) {
+        uint32_t bno = dir_block_at(fs, dir_inode, b);
         if (bno == 0) break;
         if (!read_block(fs, bno, blk)) continue;
 
@@ -575,8 +672,9 @@ static bool dir_remove_entry(ext2_fs_t *fs, uint32_t dir_ino, const char *name)
     uint8_t *blk = kmalloc(fs->block_size);
     if (!blk) return false;
 
-    for (int b = 0; b < 12; b++) {
-        uint32_t bno = dir_inode.i_block[b];
+    uint32_t nblocks = dir_block_count(fs, &dir_inode);
+    for (uint32_t b = 0; b < nblocks; b++) {
+        uint32_t bno = dir_block_at(fs, &dir_inode, b);
         if (bno == 0) break;
         if (!read_block(fs, bno, blk)) continue;
 
@@ -688,11 +786,13 @@ bool ext2_lookup(ext2_fs_t *fs, const char *path, uint32_t *inode_out)
         ext2_inode_t ino;
         if (!read_inode(fs, cur_ino, &ino)) return false;
 
-        /* Search direct blocks. */
+        /* Search every block of the directory, direct and indirect. */
         uint32_t found = 0;
-        for (int b = 0; b < 12 && !found; ++b) {
-            if (ino.i_block[b] == 0) break;
-            if (!read_block(fs, ino.i_block[b], fs->scratch)) return false;
+        uint32_t nblocks = dir_block_count(fs, &ino);
+        for (uint32_t b = 0; b < nblocks && !found; ++b) {
+            uint32_t bno = dir_block_at(fs, &ino, b);
+            if (bno == 0) break;
+            if (!read_block(fs, bno, fs->scratch)) return false;
             found = dir_find_in_block(fs->scratch, fs->block_size, p, name_len);
         }
 
@@ -817,9 +917,11 @@ uint32_t ext2_list_dir(ext2_fs_t *fs, uint32_t dir_ino,
     if (!read_inode(fs, dir_ino, &inode)) return 0;
 
     uint32_t written = 0;
-    for (int b = 0; b < 12; ++b) {
-        if (inode.i_block[b] == 0) break;
-        if (!read_block(fs, inode.i_block[b], fs->scratch)) break;
+    uint32_t nblocks = dir_block_count(fs, &inode);
+    for (uint32_t b = 0; b < nblocks; ++b) {
+        uint32_t bno = dir_block_at(fs, &inode, b);
+        if (bno == 0) break;
+        if (!read_block(fs, bno, fs->scratch)) break;
         written = list_dir_block(fs->scratch, fs->block_size, buf, bufsz, written, flags);
     }
     if (written < bufsz) buf[written] = '\0';
@@ -946,17 +1048,70 @@ int64_t ext2_write(ext2_fs_t *fs, uint32_t ino, uint64_t off,
         uint64_t new_end = off + written;
         if (new_end > inode.i_size) {
             inode.i_size = (uint32_t)new_end;
-            /* Update i_blocks (512-byte units). */
-            uint32_t blks = 0;
-            for (int b = 0; b < 12; b++)
-                if (inode.i_block[b]) blks++;
-            if (inode.i_block[12]) blks++;
-            if (inode.i_block[13]) blks++;
-            inode.i_blocks = blks * (fs->block_size / 512);
+            /* i_blocks counts 512-byte units of *allocated* blocks, metadata
+               included -- see count_inode_blocks. */
+            inode.i_blocks = count_inode_blocks(fs, &inode) *
+                             (fs->block_size / 512);
         }
         write_inode(fs, ino, &inode);
     }
     return (int64_t)written;
+}
+
+/* Count every filesystem block this inode owns: data blocks plus the indirect
+   blocks that point at them.  i_blocks is in 512-byte units and must include
+   metadata, which is what e2fsck checks it against.
+
+   The old calculation counted *pointer slots in the inode* -- twelve direct
+   plus one indirect plus one doubly-indirect, so at most 14 -- which is right
+   only for a file that fits in the direct blocks.  Anything larger was wrong by
+   orders of magnitude (a 1 MiB file with 1 KiB blocks reported 14 blocks
+   instead of ~1028), and e2fsck flags every such inode. */
+static uint32_t count_inode_blocks(ext2_fs_t *fs, const ext2_inode_t *inode)
+{
+    uint32_t ptrs = fs->block_size / 4;
+    uint32_t n = 0;
+
+    for (int b = 0; b < 12; b++) {
+        if (inode->i_block[b]) n++;
+    }
+
+    if (inode->i_block[12]) {
+        n++;                                  /* the indirect block itself */
+        uint8_t *ind = kmalloc(fs->block_size);
+        if (ind) {
+            if (read_block(fs, inode->i_block[12], ind)) {
+                for (uint32_t i = 0; i < ptrs; i++) {
+                    if (((uint32_t *)ind)[i]) n++;
+                }
+            }
+            kfree(ind);
+        }
+    }
+
+    if (inode->i_block[13]) {
+        n++;                                  /* the doubly-indirect block */
+        uint8_t *dbl = kmalloc(fs->block_size);
+        if (dbl) {
+            if (read_block(fs, inode->i_block[13], dbl)) {
+                uint8_t *ind = kmalloc(fs->block_size);
+                for (uint32_t i = 0; i < ptrs; i++) {
+                    uint32_t ibno = ((uint32_t *)dbl)[i];
+                    if (!ibno) continue;
+                    n++;                      /* each second-level block */
+                    if (ind && read_block(fs, ibno, ind)) {
+                        for (uint32_t j = 0; j < ptrs; j++) {
+                            if (((uint32_t *)ind)[j]) n++;
+                        }
+                    }
+                }
+                if (ind) kfree(ind);
+            }
+            kfree(dbl);
+        }
+    }
+
+    return n;
 }
 
 /* Free every block a singly-indirect block points at, then the block itself. */
@@ -1211,8 +1366,9 @@ bool ext2_rename(ext2_fs_t *fs, const char *old_path, const char *new_path)
     if (ftype == 2 && src_parent_ino != dst_parent_ino) {
         uint8_t *blk = kmalloc(fs->block_size);
         if (blk) {
-            for (int b = 0; b < 12; b++) {
-                uint32_t bno = src_inode.i_block[b];
+            uint32_t nblocks = dir_block_count(fs, &src_inode);
+            for (uint32_t b = 0; b < nblocks; b++) {
+                uint32_t bno = dir_block_at(fs, &src_inode, b);
                 if (!bno) break;
                 if (!read_block(fs, bno, blk)) continue;
                 uint8_t *p = blk, *end = blk + fs->block_size;

@@ -207,5 +207,64 @@ void test_vfs_run(void)
     KTEST_ASSERT(vfs_rmdir("/") != 0);
     KTEST_ASSERT(vfs_file_size("/hello.txt") == sz);
 
+    /* ---- A directory must work past its twelfth block ----------------------
+       Directory walks used to stop at the 12 direct blocks, so once a directory
+       grew past ~12 KiB new files were still created but became invisible to
+       lookup and listing, and dir_add_entry started failing after freeing the
+       block it had just allocated.  Long names fill blocks quickly, so this
+       crosses the boundary in a couple of hundred entries rather than a
+       thousand. */
+    {
+        /* 60-char leaf: an 8-byte dirent header plus 60 bytes of name is 68,
+           so about 15 fit per 1 KiB block and ~190 entries pass 12 blocks. */
+        const char *pad = "_padding_to_make_this_name_long_enough_to_fill_blocks";
+        char path[128];
+        const uint32_t N = 200;
+        uint32_t created = 0;
+
+        KTEST_ASSERT(vfs_mkdir("/ktest_big") == 0);
+
+        for (uint32_t i = 0; i < N; ++i) {
+            /* "/ktest_big/f<NNN>_<pad>" */
+            uint32_t n = 0;
+            const char *pfx = "/ktest_big/f";
+            for (const char *c = pfx; *c; ++c) path[n++] = *c;
+            path[n++] = (char)('0' + (i / 100) % 10);
+            path[n++] = (char)('0' + (i / 10) % 10);
+            path[n++] = (char)('0' + i % 10);
+            for (const char *c = pad; *c; ++c) path[n++] = *c;
+            path[n] = '\0';
+            if (vfs_creat(path) == 0) created++;
+        }
+        /* Every create must succeed -- the old code began failing partway. */
+        KTEST_ASSERT(created == N);
+
+        /* The last one must be findable: this is the lookup path past block 12. */
+        KTEST_ASSERT(vfs_file_size(path) != UINT64_MAX);
+
+        /* And listing must report all of them, not just the first ~180. */
+        static char big[64 * 1024];
+        uint32_t got = vfs_listdir("/ktest_big", big, sizeof(big), 0);
+        KTEST_ASSERT(got > 0);
+        uint32_t lines = 0;
+        for (uint32_t k = 0; k < got; ++k) if (big[k] == '\n') lines++;
+        KTEST_ASSERT(lines == N);
+
+        /* Clean up: also exercises removing a directory that grew an indirect
+           block, whose block must be freed by free_inode_blocks. */
+        for (uint32_t i = 0; i < N; ++i) {
+            uint32_t n = 0;
+            const char *pfx = "/ktest_big/f";
+            for (const char *c = pfx; *c; ++c) path[n++] = *c;
+            path[n++] = (char)('0' + (i / 100) % 10);
+            path[n++] = (char)('0' + (i / 10) % 10);
+            path[n++] = (char)('0' + i % 10);
+            for (const char *c = pad; *c; ++c) path[n++] = *c;
+            path[n] = '\0';
+            vfs_unlink(path);
+        }
+        KTEST_ASSERT(vfs_rmdir("/ktest_big") == 0);
+    }
+
     test_vfs_concurrency();
 }
