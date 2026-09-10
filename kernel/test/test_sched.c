@@ -44,16 +44,31 @@ static void counter_thread(void *arg)
 
 static volatile uint32_t mutex_counter;
 static mutex_t test_mutex = MUTEX_INIT;
+/* Per-thread progress and an overlap counter.  Kept deliberately: this suite has
+   a known intermittent failure (mutex_counter == 20U, roughly 1 boot in 15-20)
+   and these are what distinguish "a worker got stuck" from "the mutex stopped
+   excluding".  See the follow-up section of docs/audit-2026-08-14.md. */
+static volatile uint32_t mutex_iters[2];
+static volatile uint32_t mutex_inside;      /* threads inside the critical section */
+static volatile uint32_t mutex_overlap;     /* times that count exceeded 1 */
+static struct thread *mutex_thr[2];
 
 static void mutex_thread(void *arg)
 {
-	(void)arg;
+	uint32_t idx = (uint32_t)(uintptr_t)arg;
 	for (uint32_t i = 0; i < 10U; ++i) {
 		mutex_lock(&test_mutex);
+		/* Catch two threads inside at once, which is the only way an increment
+		   can be lost given the read/yield/write below. */
+		if (__atomic_add_fetch(&mutex_inside, 1U, __ATOMIC_SEQ_CST) > 1U) {
+			__atomic_add_fetch(&mutex_overlap, 1U, __ATOMIC_SEQ_CST);
+		}
 		uint32_t v = mutex_counter;
 		thread_yield();   /* force interleaving */
 		mutex_counter = v + 1U;
+		__atomic_sub_fetch(&mutex_inside, 1U, __ATOMIC_SEQ_CST);
 		mutex_unlock(&test_mutex);
+		if (idx < 2U) mutex_iters[idx] = i + 1U;
 	}
 	thread_exit();
 }
@@ -249,14 +264,49 @@ void test_sched_run(void)
 
 	/* --- Mutex-protected counter --- */
 	mutex_counter = 0;
+	mutex_iters[0] = mutex_iters[1] = 0;
+	mutex_inside = 0;
+	mutex_overlap = 0;
 
 	__asm__ volatile("sti" ::: "memory");
-	thread_create(mutex_thread, NULL);
-	thread_create(mutex_thread, NULL);
+	mutex_thr[0] = thread_create(mutex_thread, (void *)(uintptr_t)0U);
+	mutex_thr[1] = thread_create(mutex_thread, (void *)(uintptr_t)1U);
 
 	/* Yield this thread so the mutex threads can run. */
 	KTEST_WAIT_MS(mutex_counter >= 20U, KTEST_WAIT_WW);
 	__asm__ volatile("cli" ::: "memory");
+	/* Report what the participants were doing, so the known intermittent
+	   failure arrives with evidence rather than just a count. */
+	if (mutex_counter != 20U) {
+		serial_write("ktest: mutex counter="); serial_write_dec(mutex_counter);
+		serial_write(" iters=");  serial_write_dec(mutex_iters[0]);
+		serial_write("/");        serial_write_dec(mutex_iters[1]);
+		serial_write(" overlap="); serial_write_dec(mutex_overlap);
+		serial_write(" inside=");  serial_write_dec(mutex_inside);
+		serial_write("\n");
+		for (int i = 0; i < 2; ++i) {
+			struct thread *t = mutex_thr[i];
+			serial_write("ktest:   thr"); serial_write_dec((uint64_t)i);
+			if (t) {
+				serial_write(" tid=");    serial_write_dec(t->tid);
+				serial_write(" state=");  serial_write_dec((uint64_t)t->state);
+				serial_write(" on_cpu="); serial_write_dec((uint64_t)t->on_cpu);
+				serial_write(" locks=");  serial_write_dec((uint64_t)t->locks_held);
+			}
+			serial_write("\n");
+		}
+		serial_write("ktest:   mutex locked=");
+		serial_write_dec((uint64_t)test_mutex.locked);
+		serial_write(" owner_tid=");
+		serial_write_dec(test_mutex.owner ? (uint64_t)test_mutex.owner->tid : 9999);
+		serial_write(" waiters=");
+		uint32_t nw = 0;
+		for (struct thread *w = test_mutex.waiters; w && nw < 8; w = w->mutex_next, ++nw) {
+			serial_write("tid"); serial_write_dec((uint64_t)w->tid); serial_write(" ");
+		}
+		if (nw == 0) serial_write("(none)");
+		serial_write("\n");
+	}
 	KTEST_ASSERT(mutex_counter == 20U);
 
 	/* --- Yield interleaving --- */
