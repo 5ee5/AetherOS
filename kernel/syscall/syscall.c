@@ -478,7 +478,9 @@ static int64_t sys_exit(uint64_t status)
 
 static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
 {
-    struct process *target = process_find((uint32_t)pid);
+    /* Referenced for the duration: this function blocks, polls the console and
+       may kill the target, all while holding this pointer. */
+    struct process *target = process_find_ref((uint32_t)pid);
     if (!target) return -10;   /* ECHILD */
 
     /* Only a process's own parent may wait on it.  Without this check any user
@@ -486,13 +488,19 @@ static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
        kill it — bypassing the uid check in sys_kill — or race a second waiter
        into process_reap and free a struct the other one is still holding. */
     struct process *caller = sched_current_process();
-    if (!caller || target->ppid != caller->pid) return -10; /* ECHILD */
+    if (!caller || target->ppid != caller->pid) {
+        process_put(target);
+        return -10; /* ECHILD */
+    }
 
     /* WNOHANG: report "still running" instead of blocking, so a shell can poll
        its background jobs and collect them as they finish.  Without a way to
        reap without blocking, every background job stayed a zombie for the
        lifetime of the shell. */
-    if ((options & WNOHANG) && !target->exited) return 0;
+    if ((options & WNOHANG) && !target->exited) {
+        process_put(target);
+        return 0;
+    }
 
     caller->in_waitpid = true;
     while (!target->exited) {
@@ -524,8 +532,11 @@ static int64_t sys_waitpid(uint64_t pid, uint64_t status_virt, uint64_t options)
         int32_t st = target->exit_status << 8;
         copy_to_user((void *)(uintptr_t)status_virt, &st, sizeof(st)); /* best-effort */
     }
-    /* Parent has collected the status: free the zombie's struct and table slot. */
+    /* Parent has collected the status: release the table slot, then drop our
+       reference.  process_reap defers the kfree while this reference is held,
+       so the order here is safe either way round. */
     process_reap(target);
+    process_put(target);
     return (int64_t)pid;
 }
 
@@ -1077,10 +1088,17 @@ static int64_t syscall_do(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2,
     case SYS_KILL: {
         struct process *caller = sched_current_process();
         if (!caller) return -1;
-        struct process *victim = process_find((uint32_t)a0);
+        /* Hold a reference across the permission check and the kill: the
+           victim's parent could otherwise waitpid-reap and free the struct
+           between the lookup and either dereference. */
+        struct process *victim = process_find_ref((uint32_t)a0);
         if (!victim) return -3; /* ESRCH */
-        if (caller->cred.euid != 0 && caller->cred.uid != victim->cred.uid) return -1;
+        if (caller->cred.euid != 0 && caller->cred.uid != victim->cred.uid) {
+            process_put(victim);
+            return -1;
+        }
         process_kill(victim);
+        process_put(victim);
         return 0;
     }
     case SYS_PS: {

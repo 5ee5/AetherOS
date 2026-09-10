@@ -23,6 +23,12 @@ struct process {
     cred_t        cred;
     volatile bool    exited;
     volatile int32_t exit_status;
+    /* Outstanding process_find_ref references, and whether the table slot has
+       been released.  The struct is freed by whichever of process_reap and the
+       last process_put runs last, so a lookup result can never be freed under a
+       caller that is still holding it.  Both are protected by proc_table_lock. */
+    uint32_t         refs;
+    bool             reaped;
     struct thread   *wait_queue;  /* threads blocked in sys_waitpid */
     /* Which end of the console this process is currently sitting on.  Ctrl+C is
        polled by every sys_waitpid caller, so in a login -> shell -> job chain
@@ -53,12 +59,28 @@ void process_mark_exited(struct process *proc, int32_t status);
 /* Load an ELF binary and create a user-mode thread. Returns NULL on failure. */
 struct process *process_create_from_elf(const void *elf_data, uint64_t size);
 
-/* Look up a process by PID. Returns NULL if not found. */
-struct process *process_find(uint32_t pid);
+/* Look a process up by pid and take a reference, so the struct cannot be freed
+   while the caller still holds the pointer.  Release it with process_put.
+
+   This replaces a process_find that returned a raw pointer after dropping
+   proc_table_lock: a parent's waitpid could reap and kfree the struct between
+   the lookup and the caller's first dereference, a use-after-free reachable
+   from kill(2) and made worse by pid reuse handing the same number to a
+   different process. */
+struct process *process_find_ref(uint32_t pid);
+
+/* Drop a reference taken by process_find_ref, freeing the struct if it has
+   already been reaped and this was the last reference. */
+void process_put(struct process *proc);
+
+/* Existence check that never hands out a pointer, for callers that only need to
+   know whether a pid is still live. */
+bool process_exists(uint32_t pid);
 
 /* Free an exited process's struct and release its table slot.  Idempotent:
    only the caller that removes the table entry frees the struct, so a racing
-   second reap of the same process is a no-op rather than a double free. */
+   second reap of the same process is a no-op rather than a double free.  If
+   references are outstanding the free is deferred to the last process_put. */
 void process_reap(struct process *proc);
 
 /* Forcibly terminate a process (SIGKILL semantics). Safe to call from kernel. */

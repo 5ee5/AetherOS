@@ -46,7 +46,11 @@ void test_proc_run(void)
        match this field, so a stale or wrong ppid would let one process wait on
        — and via the Ctrl+C path kill — an unrelated one. */
     KTEST_ASSERT(p->ppid == 0);
-    KTEST_ASSERT(process_find(pid) == p);
+    /* find_ref returns the same struct and takes a reference; drop it straight
+       away so the reap below is not deferred. */
+    struct process *found = process_find_ref(pid);
+    KTEST_ASSERT(found == p);
+    process_put(found);
     /* process_start() was not called, so the thread is parked off the runqueue
        and the scheduler's deferred reaper will never see it. */
     KTEST_ASSERT(t != NULL);
@@ -54,7 +58,7 @@ void test_proc_run(void)
 
     /* First reap releases the table slot and frees the struct. */
     process_reap(p);
-    KTEST_ASSERT(process_find(pid) == NULL);
+    KTEST_ASSERT(!process_exists(pid));
 
     /* A second reap of the same (now dangling) pointer must be a no-op.  Before
        the table slot was claimed under proc_table_lock, both callers reached
@@ -62,7 +66,35 @@ void test_proc_run(void)
        process_reap compares the pointer without dereferencing it, so passing
        the freed pointer here is exactly the race being guarded. */
     process_reap(p);
-    KTEST_ASSERT(process_find(pid) == NULL);
+    KTEST_ASSERT(!process_exists(pid));
+
+    /* ---- A reference must outlive a concurrent reap ----------------------
+       process_find_ref is what stops kill(2) and waitpid dereferencing a struct
+       the other one has already freed, so check the deferral directly: reap
+       while a reference is held, then confirm the pid is gone from the table but
+       the struct is still readable, and only the final put releases it. */
+    {
+        elf_load_result_t r2;
+        KTEST_ASSERT(elf_load(hello_elf_start, size, &r2));
+        struct process *p2 = process_create_from_result(&r2);
+        KTEST_ASSERT(p2 != NULL);
+        uint32_t pid2 = p2->pid;
+
+        struct process *held = process_find_ref(pid2);
+        KTEST_ASSERT(held == p2);
+
+        /* Reap while the reference is outstanding: the slot goes, the memory
+           must not. */
+        process_reap(p2);
+        KTEST_ASSERT(!process_exists(pid2));
+        KTEST_ASSERT(held->pid == pid2);   /* would be freed memory before */
+
+        /* Last reference: this is what actually frees it. */
+        process_put(held);
+        KTEST_ASSERT(!process_exists(pid2));
+
+        vmm_space_destroy(r2.cr3);
+    }
 
     /* Release what the parked thread owns, since nothing else will. */
     vmm_space_destroy(r.cr3);

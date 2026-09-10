@@ -36,12 +36,34 @@ static struct process *find_locked(uint32_t pid)
     return NULL;
 }
 
-struct process *process_find(uint32_t pid)
+struct process *process_find_ref(uint32_t pid)
 {
     uint64_t f = spinlock_acquire_irqsave(&proc_table_lock);
     struct process *p = find_locked(pid);
+    if (p) p->refs++;
     spinlock_release_irqrestore(&proc_table_lock, f);
     return p;
+}
+
+void process_put(struct process *proc)
+{
+    if (!proc) return;
+    bool freeit = false;
+    uint64_t f = spinlock_acquire_irqsave(&proc_table_lock);
+    if (proc->refs > 0) proc->refs--;
+    /* Only the reaper that claimed the table slot sets `reaped`, so exactly one
+       path frees, and it is whichever of the two finishes last. */
+    if (proc->refs == 0 && proc->reaped) freeit = true;
+    spinlock_release_irqrestore(&proc_table_lock, f);
+    if (freeit) kfree(proc);
+}
+
+bool process_exists(uint32_t pid)
+{
+    uint64_t f = spinlock_acquire_irqsave(&proc_table_lock);
+    bool found = (find_locked(pid) != NULL);
+    spinlock_release_irqrestore(&proc_table_lock, f);
+    return found;
 }
 
 /* Allocate a pid not currently in use. next_pid advances monotonically but
@@ -66,13 +88,21 @@ void process_reap(struct process *proc)
     if (!proc) return;
     /* Claim the table slot under the lock and free only if we won.  Two callers
        racing on the same process would otherwise both reach kfree. */
-    bool claimed = false;
+    bool claimed = false, freeit = false;
     uint64_t f = spinlock_acquire_irqsave(&proc_table_lock);
     for (int i = 0; i < MAX_PROCS; ++i) {
-        if (s_procs[i] == proc) { s_procs[i] = NULL; claimed = true; break; }
+        if (s_procs[i] == proc) {
+            s_procs[i] = NULL;
+            claimed = true;
+            proc->reaped = true;
+            break;
+        }
     }
+    /* Defer the free while anyone still holds a reference from
+       process_find_ref; their process_put does it instead. */
+    if (claimed && proc->refs == 0) freeit = true;
     spinlock_release_irqrestore(&proc_table_lock, f);
-    if (claimed) kfree(proc);
+    if (freeit) kfree(proc);
 }
 
 /* Called when `parent` exits.  Any child of its that is already a zombie will
@@ -105,7 +135,7 @@ void process_orphan_children(struct process *parent)
 void process_reap_if_orphaned(struct process *proc)
 {
     if (!proc || !proc->exited) return;
-    if (proc->ppid != 0 && process_find(proc->ppid) != NULL) return;
+    if (proc->ppid != 0 && process_exists(proc->ppid)) return;
     process_reap(proc);
 }
 
@@ -203,6 +233,8 @@ struct process *process_create_from_result(const elf_load_result_t *r)
 
     proc->cr3         = r->cr3;
     proc->exited      = false;
+    proc->refs        = 0;
+    proc->reaped      = false;
     proc->exit_status = 0;
     proc->wait_queue  = NULL;
     proc->in_waitpid      = false;
