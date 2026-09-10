@@ -11,7 +11,7 @@ typedef struct {
 	spinlock_t     lock;
 	bool           locked;
 	struct thread *owner;
-	struct thread *waiters;  /* linked via wait_next */
+	struct thread *waiters;  /* linked via thread->mutex_next */
 } mutex_t;
 
 #define MUTEX_INIT { .lock = SPINLOCK_INIT, .locked = false, \

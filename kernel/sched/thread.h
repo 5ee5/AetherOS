@@ -25,7 +25,16 @@ struct thread {
 	volatile bool  on_cpu;     /* executing on a CPU now; gates cross-CPU wakeups */
 	uint64_t       cr3;        /* PML4 phys for user thread (0 = kernel) */
 	struct thread *run_next;     /* run queue linkage */
-	struct thread *wait_next;    /* wait/blocked queue linkage */
+	struct thread *wait_next;    /* process wait_queue linkage */
+	/* Mutex waiter-list linkage.  Deliberately NOT wait_next: that field is the
+	   process wait queue's, and sharing one pointer between the two lists means
+	   a thread linked into both has its link overwritten by whichever came
+	   second -- truncating the other list and losing every entry behind it.  A
+	   mutex whose waiter list is truncated releases with waiters it can no
+	   longer see, and those threads stay THREAD_BLOCKED forever while the mutex
+	   sits free. */
+	struct thread *mutex_next;
+
 	/* True while linked into a process wait_queue via wait_next.  Such a thread
 	   is also on the sleep list (process_wait_timeout blocks on both), so
 	   sched_kill cannot free it on the strength of sleep-list membership alone —

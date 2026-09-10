@@ -15,7 +15,10 @@ struct process *sched_current_process(void);
 /* Wake a blocked thread: mark READY and re-enqueue.  Ignores a thread that is
    not BLOCKED, so a DEAD thread is never resurrected and one already runnable is
    never enqueued twice. */
-void sched_wake(struct thread *t);
+/* Make a blocked thread runnable.  Returns true if it actually did: only a
+   THREAD_BLOCKED thread is promoted, so a wakeup aimed at a thread in any other
+   state (already runnable, or dead) is a no-op the caller may need to notice. */
+bool sched_wake(struct thread *t);
 
 /* Terminate a thread wherever it is: running, READY, sleeping, or blocked.
    THREAD_DEAD is terminal — the thread never executes again.

@@ -65,6 +65,7 @@ static struct thread *alloc_thread(void)
 	t->cr3        = 0;
 	t->run_next   = NULL;
 	t->wait_next  = NULL;
+	t->mutex_next = NULL;
 	t->on_waitq   = false;
 	t->locks_held = 0;
 	t->kill_pending = false;

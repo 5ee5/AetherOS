@@ -186,7 +186,7 @@ struct process *sched_current_process(void)
 	return (struct process *)t->process;
 }
 
-void sched_wake(struct thread *t)
+bool sched_wake(struct thread *t)
 {
 	/* Wait until the thread has left its CPU before making it runnable.  A
 	   thread blocks by setting BLOCKED, dropping its lock, then yielding via
@@ -204,12 +204,18 @@ void sched_wake(struct thread *t)
 	   a mutex_unlock or an exit notification that still holds a pointer to it;
 	   and a thread already READY (woken by another source — a wait queue and a
 	   sleep deadline can both fire) must not be enqueued a second time. */
+	bool woke = false;
 	if (t->state == THREAD_BLOCKED) {
 		sleep_unlink_locked(t);
 		t->state = THREAD_READY;
 		rq_add(t);
+		woke = true;
 	}
 	spinlock_release_irqrestore(&rq_lock, f);
+	/* Reported so a caller that must not lose the wakeup -- mutex_unlock, which
+	   has already released the lock -- can try the next waiter rather than
+	   assume this one took it. */
+	return woke;
 }
 
 /* Terminate a thread that may be blocked, sleeping, or running on another CPU.
@@ -454,6 +460,17 @@ void sched_sleep_ms(uint64_t ms)
 	if (!t || t->is_idle) return;
 
 	uint64_t f = spinlock_acquire_irqsave(&rq_lock);
+	/* THREAD_DEAD is terminal, and this is one of the two places that used to
+	   quietly break that.  A thread killed after it entered this function but
+	   before it reached here had its DEAD state overwritten with BLOCKED, so it
+	   went on the sleep list, its deadline expired, the sleeper loop promoted it
+	   back to READY, and the corpse resumed and ran the code after its sleep.
+	   Don't sleep a dead thread: return and let it die at the next reschedule. */
+	if (t->state == THREAD_DEAD) {
+		spinlock_release_irqrestore(&rq_lock, f);
+		SCHED_YIELD();
+		return;
+	}
 	/* Deadline on the monotonic clock.  This used to be `g_ticks + ms`, which
 	   made every sleep expire early by however many times the scheduler happened
 	   to be entered per millisecond — `sleep 30` returned after about 10 s. */
