@@ -410,6 +410,17 @@ static uint64_t schedule(uint64_t old_rsp, bool from_timer)
 
 	spinlock_release(&rq_lock);
 
+	/* Swap x87/SSE state.  Only on a real switch: fxsave/fxrstor against the
+	   same thread would be pure cost.  Done here, after rq_lock is dropped and
+	   before the stub loads the new stack, because both threads' structs are
+	   still valid at this point (a dead `cur` is not freed until the next tick).
+	   The kernel builds -mgeneral-regs-only so it never clobbers this state
+	   itself; user code does, which is what makes the swap necessary. */
+	if (cur != next) {
+		__asm__ volatile("fxsave64 (%0)" : : "r"(cur->fpu)  : "memory");
+		__asm__ volatile("fxrstor64 (%0)" : : "r"(next->fpu) : "memory");
+	}
+
 	/* Update TSS rsp0 and CR3 when entering a user thread. */
 	if (next->is_user && next->cr3 != 0) {
 		tss_set_rsp0(next->kstack_top);

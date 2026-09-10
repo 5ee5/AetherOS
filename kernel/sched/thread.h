@@ -39,6 +39,19 @@ struct thread {
 	/* Set when such a kill was deferred; the thread dies at the next syscall
 	   return, by which point it holds nothing. */
 	bool           kill_pending;
+	/* x87/SSE state, saved and restored by the context switch.  Before this
+	   existed the switch saved 15 GP registers and nothing else, so two user
+	   processes sharing a CPU silently corrupted each other's XMM registers --
+	   masked only by building everything -mgeneral-regs-only.
+
+	   FXSAVE64/FXRSTOR64 need a 16-byte-aligned operand and #GP otherwise, and
+	   the alignment cannot be delegated to the allocator: kmalloc hands back
+	   `block + sizeof(struct block)`, and that header is 40 bytes, so every
+	   allocation is 8-byte aligned.  An __attribute__((aligned(16))) member
+	   would therefore be a promise the heap does not keep.  Carry 16 bytes of
+	   slack and point `fpu` at the aligned offset inside it. */
+	uint8_t  fpu_area[512 + 16];
+	uint8_t *fpu;
 	struct thread *sleep_next;   /* sleep queue linkage */
 	uint64_t       sleep_deadline; /* tick at which to wake (0 = not sleeping) */
 	void          *process;      /* owning struct process, or NULL */

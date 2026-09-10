@@ -76,6 +76,18 @@ static struct thread *alloc_thread(void)
 	t->process        = NULL;
 	t->sleep_next     = NULL;
 	t->sleep_deadline = 0;
+
+	/* Point fpu at the first 16-byte-aligned byte of the slack buffer; see the
+	   note in struct thread for why this cannot rely on kmalloc's alignment. */
+	t->fpu = (uint8_t *)(((uintptr_t)t->fpu_area + 15U) & ~(uintptr_t)15U);
+
+	/* A valid "freshly initialised FPU" FXSAVE image: all zero except the x87
+	   control word and MXCSR, which must hold their architectural defaults.
+	   FXRSTOR #GPs if MXCSR has reserved bits set, so this cannot just be
+	   zeroed.  (MXCSR_MASK is ignored on restore, so leaving it 0 is fine.) */
+	for (uint32_t i = 0; i < 512U; ++i) t->fpu[i] = 0;
+	t->fpu[0] = 0x7f; t->fpu[1] = 0x03;          /* FCW   = 0x037f */
+	t->fpu[24] = 0x80; t->fpu[25] = 0x1f;        /* MXCSR = 0x1f80 */
 	return t;
 }
 

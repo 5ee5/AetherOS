@@ -9,6 +9,12 @@
 #define IA32_EFER           0xc0000080U
 #define EFER_NXE            (1ULL << 11U)
 #define CR4_SMEP            (1ULL << 20U)
+#define CR4_OSFXSR     (1UL << 9U)
+#define CR4_OSXMMEXCPT (1UL << 10U)
+#define CR0_MP         (1UL << 1U)
+#define CR0_EM         (1UL << 2U)
+#define CR0_TS         (1UL << 3U)
+#define CR0_NE         (1UL << 5U)
 #define CR4_SMAP            (1ULL << 21U)
 
 struct cpu_local cpu_local_data[MAX_CPUS];
@@ -66,6 +72,25 @@ void cpu_enable_protections(void)
 
     if (b & (1U << 20U)) cpu_smap_active = true;
 
+    /* Turn on FXSAVE/FXRSTOR and SSE exceptions explicitly, and initialise the
+       FPU, on every CPU.  None of this used to be touched anywhere: SSE worked
+       only because the UEFI firmware happened to leave CR4.OSFXSR set, which is
+       not something to rely on -- and the scheduler now saves and restores FPU
+       state through fxsave64/fxrstor64, which #UD without OSFXSR and #NM if
+       CR0.TS is left set.  CR0.EM must be clear (no x87 emulation) and CR0.MP
+       set so WAIT/FWAIT behaves. */
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= CR4_OSFXSR | CR4_OSXMMEXCPT;
+    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+
+    uint64_t cr0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 |=  (CR0_MP | CR0_NE);
+    cr0 &= ~(CR0_EM | CR0_TS);
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
+
+    __asm__ volatile("fninit");
+
     /* Report what actually took effect: on a CPU without these features the
        calls above are silent no-ops, and "the tests still pass" would prove
        nothing about whether the protections are on. */
@@ -76,6 +101,8 @@ void cpu_enable_protections(void)
     serial_write((cr4 & CR4_SMEP) ? "on" : "off");
     serial_write(" smap=");
     serial_write((cr4 & CR4_SMAP) ? "on" : "off");
+    serial_write(" fxsr=");
+    serial_write((cr4 & CR4_OSFXSR) ? "on" : "off");
     serial_write("\n");
 }
 
